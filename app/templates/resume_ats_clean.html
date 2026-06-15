@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>{{ full_name }} — Resume</title>
+<style>
+    @page { size: A4; margin: 1.6cm; }
+    body {
+        font-family: 'Helvetica', 'Arial', sans-serif;
+        font-size: 10.5pt;
+        line-height: 1.4;
+        color: #1a1a1a;
+        margin: 0;
+    }
+    h1 {
+        font-size: 20pt;
+        margin: 0 0 4px 0;
+        text-align: center;
+        letter-spacing: 1px;
+    }
+    .contact-line {
+        text-align: center;
+        font-size: 9.5pt;
+        color: #444;
+        margin-bottom: 14px;
+    }
+    h2 {
+        font-size: 12pt;
+        text-transform: uppercase;
+        letter-spacing: 1px;
+        border-bottom: 1.5px solid #1a1a1a;
+        padding-bottom: 2px;
+        margin: 16px 0 8px 0;
+    }
+    .entry-header {
+        display: flex;
+        justify-content: space-between;
+        font-weight: bold;
+        margin-bottom: 2px;
+    }
+    .entry-subheader {
+        font-style: italic;
+        color: #333;
+        margin-bottom: 4px;
+        font-size: 9.5pt;
+    }
+    ul {
+        margin: 0 0 8px 18px;
+        padding: 0;
+    }
+    li { margin-bottom: 2px; }
+    .skills-list { margin: 0; }
+    .summary { margin-bottom: 4px; }
+</style>
+</head>
+<body>
+    <h1>{{ full_name }}</h1>
+    <div class="contact-line">
+        {{ contact.email or '' }}{% if contact.phone %} | {{ contact.phone }}{% endif %}{% if contact.linkedin %} | {{ contact.linkedin }}{% endif %}{% if contact.location %} | {{ contact.location }}{% endif %}
+    </div>
+
+    {% if summary %}
+    <h2>Professional Summary</h2>
+    <p class="summary">{{ summary }}</p>
+    {% endif %}
+
+    {% if experience %}
+    <h2>Work Experience</h2>
+    {% for exp in experience %}
+    <div class="entry-header">
+        <span>{{ exp.title }} — {{ exp.company }}</span>
+        <span>{{ exp.start_date }} – {{ exp.end_date or 'Present' }}</span>
+    </div>
+    <div class="entry-subheader">{{ exp.location or '' }}</div>
+    <ul>
+        {% for bullet in exp.bullets %}
+        <li>{{ bullet }}</li>
+        {% endfor %}
+    </ul>
+    {% endfor %}
+    {% endif %}
+
+    {% if education %}
+    <h2>Education</h2>
+    {% for edu in education %}
+    <div class="entry-header">
+        <span>{{ edu.degree }} — {{ edu.institution }}</span>
+        <span>{{ edu.year or '' }}</span>
+    </div>
+    {% endfor %}
+    {% endif %}
+
+    {% if skills %}
+    <h2>Skills</h2>
+    <p class="skills-list">{{ skills | join(', ') }}</p>
+    {% endif %}
+
+    {% if certifications %}
+    <h2>Certifications</h2>
+    <ul>
+        {% for cert in certifications %}
+        <li>{{ cert.name }} — {{ cert.issuer }} ({{ cert.year }})</li>
+        {% endfor %}
+    </ul>
+    {% endif %}
+
+    {% if projects %}
+    <h2>Projects</h2>
+    {% for proj in projects %}
+    <div class="entry-header"><span>{{ proj.name }}</span></div>
+    <p>{{ proj.description }}</p>
+    {% if proj.technologies %}<p class="entry-subheader">Technologies: {{ proj.technologies | join(', ') }}</p>{% endif %}
+    {% endfor %}
+    {% endif %}
+</body>
+</html>
