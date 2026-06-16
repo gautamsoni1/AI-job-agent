@@ -1,14 +1,22 @@
-.env
-requirements.txt
-AI_Job_Agent_Master_Prompt.md
-.venv
-
+# Python
 venv/
+.venv/
 __pycache__/
+*.pyc
+
+# Secrets
+.env
+service_account.json
+
+# Generated Files
 chroma_db/
 uploads/
 generated_resumes/
 generated_cover_letters/
+
+# Node
 node_modules/
-.env
-service_account.json
+
+# IDE
+.vscode/
+.idea/
