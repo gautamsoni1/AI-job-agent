@@ -7,13 +7,16 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.core.dependencies import get_db, get_current_user
 from app.core.exceptions import NotFoundError
+from app.config import get_settings
 from app.repositories.job_repo import JobRepository
 from app.repositories.resume_repo import ResumeRepository
 from app.schemas.job import JobDiscoverRequest, JobDescribeRequest, JobResponse, JobListResponse
 from app.services.apify_service import ApifyService
+from app.services.google_sheets_service import GoogleSheetsService
 from app.ai.orchestrator import AIOrchestrator
 
 router = APIRouter()
+settings = get_settings()
 
 
 @router.post("/discover")
@@ -152,6 +155,9 @@ async def match_job(
         "JOB_MATCHED", f"Matched: {job.get('title')} at {job.get('company')} — {result.data.get('overall_match', 0):.0f}%",
         {"job_id": job_id, "overall_match": result.data.get("overall_match", 0)},
     )
+    background_tasks.add_task(
+        _sync_to_sheets, job, result.data.get("overall_match", 0), 0.0,
+    )
     return {"success": True, "match_report": result.data}
 
 
@@ -209,6 +215,20 @@ def _to_job_response(j: dict) -> dict:
     return j
 
 
+async def _sync_to_sheets(job: dict, match_score: float = 0.0, ats_score: float = 0.0):
+    """Best-effort sync of a job row to Google Sheets. Skips silently if
+    GOOGLE_SHEET_ID isn't configured, and never raises — a Sheets outage
+    should never break job discovery or matching."""
+    if not settings.GOOGLE_SHEET_ID:
+        return
+    try:
+        sheets = GoogleSheetsService()
+        await sheets.sync_job(job, match_score=match_score, ats_score=ats_score)
+    except Exception as e:
+        import structlog
+        structlog.get_logger().warning("sheets_sync_failed", error=str(e))
+
+
 async def _run_job_discovery(db, user_id: str, keywords: list, locations: list, experience_level: str, max_results: int):
     try:
         apify = ApifyService()
@@ -232,6 +252,7 @@ async def _run_job_discovery(db, user_id: str, keywords: list, locations: list, 
                 job_with_id = dict(raw_job)
                 job_with_id["_id"] = job_ids[0]
                 # Scout in background
+                relevance_score = 0.0
                 try:
                     result = await orchestrator.execute(
                         agent_name="job_scout_agent",
@@ -240,8 +261,13 @@ async def _run_job_discovery(db, user_id: str, keywords: list, locations: list, 
                         payload={"job": job_with_id},
                     )
                     await repo.update_scout_report(job_ids[0], result.data)
+                    relevance_score = result.data.get("relevance_score", 0.0)
                 except Exception:
                     pass
+
+                # Sync every newly discovered job to Google Sheets immediately,
+                # as required by spec. Best-effort — never blocks discovery.
+                await _sync_to_sheets(job_with_id, match_score=relevance_score, ats_score=0.0)
 
         await db["ai_timeline"].insert_one({
             "user_id": user_id,
