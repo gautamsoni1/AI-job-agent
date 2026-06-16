@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Cover Letter — {{ candidate_name }}</title>
+<style>
+    @page { size: A4; margin: 2cm 2.5cm; }
+    body {
+        font-family: 'Georgia', serif;
+        font-size: 11pt;
+        line-height: 1.6;
+        color: #222;
+    }
+    .header {
+        margin-bottom: 32px;
+    }
+    .candidate-name {
+        font-size: 16pt;
+        font-weight: 700;
+        color: #1a1a2e;
+        margin-bottom: 2px;
+    }
+    .contact-info {
+        font-size: 9.5pt;
+        color: #555;
+    }
+    .date {
+        margin: 24px 0 20px;
+        color: #444;
+    }
+    .recipient {
+        margin-bottom: 20px;
+        color: #333;
+    }
+    .subject-line {
+        font-weight: 700;
+        margin-bottom: 16px;
+        color: #1a1a2e;
+    }
+    .greeting { margin-bottom: 12px; }
+    .body-text { margin-bottom: 12px; text-align: justify; }
+    .closing { margin-top: 24px; }
+    .signature-space { height: 48px; }
+    .signature-name { font-weight: 700; font-size: 11pt; }
+</style>
+</head>
+<body>
+    <div class="header">
+        <div class="candidate-name">{{ candidate_name }}</div>
+        <div class="contact-info">
+            {{ contact_email }}{% if contact_phone %} | {{ contact_phone }}{% endif %}{% if contact_linkedin %} | {{ contact_linkedin }}{% endif %}
+        </div>
+    </div>
+
+    <div class="date">{{ date }}</div>
+
+    <div class="recipient">
+        Hiring Team<br>
+        {{ company_name }}
+    </div>
+
+    {% if subject_line %}
+    <div class="subject-line">Re: {{ subject_line }}</div>
+    {% endif %}
+
+    <div class="greeting">{{ greeting }}</div>
+
+    {% for paragraph in body_paragraphs %}
+    <div class="body-text">{{ paragraph }}</div>
+    {% endfor %}
+
+    <div class="closing">
+        <div>{{ closing }}</div>
+        <div class="signature-space"></div>
+        <div class="signature-name">{{ candidate_name }}</div>
+    </div>
+</body>
+</html>

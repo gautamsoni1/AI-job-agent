@@ -1,0 +1,14 @@
+.env
+requirements.txt
+AI_Job_Agent_Master_Prompt.md
+.venv
+
+venv/
+__pycache__/
+chroma_db/
+uploads/
+generated_resumes/
+generated_cover_letters/
+node_modules/
+.env
+service_account.json
