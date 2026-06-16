@@ -9,8 +9,10 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 from app.core.dependencies import get_db, get_current_user
 from app.core.exceptions import NotFoundError, ResumeParseError, ValidationError
 from app.repositories.resume_repo import ResumeRepository
+from app.repositories.job_repo import JobRepository
 from app.services.storage_service import StorageService
 from app.services.resume_parser_service import ResumeParserService
+from app.services.resume_generator_service import ResumeGeneratorService
 from app.schemas.resume import ResumeUploadResponse, ResumeListItem, ResumeAnalysisResponse, ResumeOptimizeRequest, ResumeOptimizeResponse
 from app.ai.orchestrator import AIOrchestrator
 from app.database import get_database
@@ -73,6 +75,23 @@ async def upload_resume(
     )
 
     resume_id = await repo.insert(resume_doc)
+    await repo.save_version({
+        "resume_id": resume_id,
+        "root_resume_id": resume_id,
+        "user_id": str(current_user["_id"]),
+        "version_number": version_number,
+        "label": "Original Upload",
+        "filename": file.filename or "resume",
+        "file_path": file_meta["file_path"],
+        "file_type": file_meta["file_type"],
+        "raw_text": parsed.get("raw_text", ""),
+        "parsed_sections": parsed.get("sections", {}),
+        "skills_extracted": parsed.get("skills_found", []),
+        "source": "upload",
+        "changes_made": ["Original resume uploaded and parsed."],
+        "target_role": None,
+        "created_at": datetime.now(timezone.utc),
+    })
 
     # Update user skills
     if parsed.get("skills_found"):
@@ -207,32 +226,134 @@ async def optimize_resume(
     if not resume or resume.get("user_id") != str(current_user["_id"]):
         raise NotFoundError("Resume", resume_id)
 
+    job_description = body.job_description or ""
+    target_role = body.target_role
+    if not job_description.strip():
+        job_repo = JobRepository(db)
+        jobs = await job_repo.find_by_user(str(current_user["_id"]), limit=1)
+        if jobs:
+            job = jobs[0]
+            job_description = _job_to_description(job)
+            target_role = target_role or job.get("title")
+    if not job_description.strip():
+        raise ValidationError("No job found for this user. Add a job first or provide job_description.")
+
     orchestrator = AIOrchestrator(db)
     result = await orchestrator.execute(
         agent_name="resume_agent",
         task="rewrite",
         user_id=str(current_user["_id"]),
-        payload={"resume_text": resume.get("raw_text", ""), "job_description": body.job_description},
+        payload={"resume_text": resume.get("raw_text", ""), "job_description": job_description},
     )
+    if not result.success:
+        raise ValidationError(f"Resume optimization failed: {result.error or 'AI service error'}")
+
+    optimized_data = _build_optimized_resume_data(resume, result.data)
+    optimized_text = _resume_data_to_text(optimized_data)
+    ats_result = await _score_optimized_resume(
+        orchestrator,
+        str(current_user["_id"]),
+        optimized_text,
+        job_description,
+    )
+    ats_target_score = 90
+    for _ in range(3):
+        if ats_result.get("ats_score", 0) >= ats_target_score:
+            break
+        retry_result = await orchestrator.execute(
+            agent_name="resume_agent",
+            task="rewrite",
+            user_id=str(current_user["_id"]),
+            payload={
+                "resume_text": _repair_resume_context(resume.get("raw_text", ""), optimized_text),
+                "job_description": _job_description_with_ats_feedback(job_description, ats_result),
+            },
+        )
+        if retry_result.success:
+            result = retry_result
+            optimized_data = _build_optimized_resume_data(resume, result.data)
+            optimized_text = _resume_data_to_text(optimized_data)
+            ats_result = await _score_optimized_resume(
+                orchestrator,
+                str(current_user["_id"]),
+                optimized_text,
+                job_description,
+            )
+        else:
+            break
+
+    meets_ats_target = ats_result.get("ats_score", 0) >= ats_target_score
+    ats_quality_warning = None
+    if not meets_ats_target:
+        ats_quality_warning = {
+            "message": "Resume optimized, but it did not reach the strict ATS target without adding unverified content.",
+            "required_score": ats_target_score,
+            "projected_ats_score": ats_result.get("ats_score", 0.0),
+            "remaining_issues": ats_result.get("formatting_issues", []),
+            "missing_keywords": ats_result.get("missing_keywords", []),
+            "next_step": "Add more truthful achievements, metrics, project details, contact details, and job-specific evidence to the source resume.",
+        }
+
+    generator = ResumeGeneratorService()
+    generated_file_path = await generator.generate_docx(optimized_data, str(current_user["_id"]))
+    generated_file_size = _safe_file_size(generated_file_path)
 
     # Save new resume version
     new_resume_doc = {
         "user_id": str(current_user["_id"]),
-        "filename": f"optimized_{resume.get('filename', 'resume')}",
+        "filename": _optimized_filename(resume.get("filename", "resume")),
         "file_path": resume.get("file_path", ""),
-        "file_type": resume.get("file_type", "pdf"),
-        "file_size": resume.get("file_size", 0),
-        "raw_text": resume.get("raw_text", ""),
-        "parsed_sections": resume.get("parsed_sections", {}),
+        "generated_file_path": generated_file_path,
+        "generated_file_type": "docx",
+        "file_type": "docx",
+        "file_size": generated_file_size,
+        "latest_ats_score": ats_result.get("ats_score", 0.0),
+        "raw_text": optimized_text,
+        "parsed_sections": {
+            "summary": optimized_data.get("summary", ""),
+            "experience": optimized_data.get("experience", []),
+            "education": optimized_data.get("education", []),
+            "projects": optimized_data.get("projects", []),
+            "skills": optimized_data.get("skills", []),
+        },
         "skills_extracted": result.data.get("rewritten_skills", []),
         "is_active": False,
         "version_number": resume.get("version_number", 1) + 1,
-        "label": f"ATS Optimized - {body.target_role or 'General'}",
+        "label": f"ATS Optimized - {target_role or 'General'}",
         "parent_resume_id": resume_id,
         "created_at": datetime.now(timezone.utc),
         "updated_at": datetime.now(timezone.utc),
     }
     new_id = await repo.insert(new_resume_doc)
+    root_resume_id = resume.get("parent_resume_id") or resume_id
+    await repo.save_version({
+        "resume_id": new_id,
+        "root_resume_id": root_resume_id,
+        "parent_resume_id": resume_id,
+        "user_id": str(current_user["_id"]),
+        "version_number": new_resume_doc["version_number"],
+        "label": new_resume_doc["label"],
+        "filename": new_resume_doc["filename"],
+        "file_path": generated_file_path,
+        "file_type": "docx",
+        "generated_file_path": generated_file_path,
+        "raw_text": optimized_text,
+        "parsed_sections": new_resume_doc["parsed_sections"],
+        "skills_extracted": new_resume_doc["skills_extracted"],
+        "source": "ai_rewrite",
+        "changes_made": result.data.get("changes_made", []),
+        "target_role": target_role,
+        "ats_target_score": ats_target_score,
+        "projected_ats_score": ats_result.get("ats_score", 0.0),
+        "projected_pass_rate": ats_result.get("predicted_pass_rate", 0.0),
+        "missing_keywords_after_optimization": ats_result.get("missing_keywords", []),
+        "improvement_score": result.data.get("improvement_score", 0.0),
+        "quality_audit": result.data.get("quality_audit", {}),
+        "meets_ats_target": meets_ats_target,
+        "ats_quality_warning": ats_quality_warning,
+        "download_url": f"/api/v1/resume/{new_id}/download",
+        "created_at": datetime.now(timezone.utc),
+    })
 
     background_tasks.add_task(
         _log_timeline,
@@ -253,6 +374,15 @@ async def optimize_resume(
             "experience": result.data.get("rewritten_experience", []),
             "skills": result.data.get("rewritten_skills", []),
             "keywords_added": result.data.get("keywords_added", []),
+            "remaining_risks": result.data.get("remaining_risks", []),
+            "ats_target_score": ats_target_score,
+            "projected_ats_score": ats_result.get("ats_score", 0.0),
+            "predicted_pass_rate": ats_result.get("predicted_pass_rate", 0.0),
+            "missing_keywords_after_optimization": ats_result.get("missing_keywords", []),
+            "quality_audit": result.data.get("quality_audit", {}),
+            "meets_ats_target": meets_ats_target,
+            "ats_quality_warning": ats_quality_warning,
+            "download_url": f"/api/v1/resume/{new_id}/download",
         },
     )
 
@@ -286,6 +416,280 @@ async def download_resume(
         path=file_path,
         filename=resume.get("filename", "resume.pdf"),
         media_type="application/octet-stream",
+    )
+
+
+def _build_optimized_resume_data(original_resume: dict, ai_data: dict) -> dict:
+    raw_text = original_resume.get("raw_text", "")
+    contact = ai_data.get("contact") or _extract_contact_from_text(raw_text)
+    data = {
+        "full_name": ai_data.get("full_name") or _guess_name(raw_text),
+        "contact": contact,
+        "summary": ai_data.get("rewritten_summary", ""),
+        "experience": ai_data.get("rewritten_experience", []) or [],
+        "education": ai_data.get("education", []) or [],
+        "projects": ai_data.get("projects", []) or [],
+        "skills": ai_data.get("rewritten_skills", []) or original_resume.get("skills_extracted", []),
+        "certifications": ai_data.get("certifications", []) or [],
+    }
+    return _polish_resume_data(data)
+
+
+def _polish_resume_data(data: dict) -> dict:
+    data["summary"] = _clean_sentence(data.get("summary", ""), ensure_period=True)
+    data["skills"] = _dedupe_preserve_order([_clean_skill(skill) for skill in data.get("skills", [])])[:28]
+    polished_experience = []
+    used_starts = {}
+    for exp in data.get("experience", []):
+        exp = dict(exp)
+        bullets = []
+        for bullet in exp.get("bullets", []):
+            clean = _clean_bullet(str(bullet))
+            if not clean:
+                continue
+            clean = _reduce_repeated_start(clean, used_starts)
+            bullets.append(clean)
+        exp["bullets"] = _dedupe_preserve_order(bullets)[:6]
+        polished_experience.append(exp)
+    data["experience"] = polished_experience
+    polished_projects = []
+    for project in data.get("projects", []):
+        project = dict(project)
+        project["description"] = _clean_sentence(project.get("description", ""), ensure_period=True)
+        project["technologies"] = _dedupe_preserve_order([_clean_skill(t) for t in project.get("technologies", [])])
+        polished_projects.append(project)
+    data["projects"] = polished_projects
+    return data
+
+
+def _clean_sentence(text: str, ensure_period: bool = False) -> str:
+    import re
+    text = str(text or "").replace("•", "").replace("–", "-").replace("—", "-")
+    text = re.sub(r"\s+", " ", text).strip(" -\t\r\n")
+    replacements = {
+        "responsible for": "owned",
+        "worked on": "contributed to",
+        "helped with": "supported",
+        "utilized": "used",
+        "various": "multiple",
+    }
+    for bad, good in replacements.items():
+        text = re.sub(rf"\b{re.escape(bad)}\b", good, text, flags=re.IGNORECASE)
+    text = re.sub(r"\bi\b", "I", text)
+    text = re.sub(r"\s+([,.;:])", r"\1", text)
+    if ensure_period and text and text[-1] not in ".!?":
+        text += "."
+    return text
+
+
+def _clean_bullet(text: str) -> str:
+    import re
+    text = _clean_sentence(text, ensure_period=True)
+    text = re.sub(r"^(responsible for|worked on|helped|handled|did)\b", "Delivered", text, flags=re.IGNORECASE)
+    words = text.split()
+    if len(words) > 32:
+        text = " ".join(words[:32]).rstrip(",;:")
+        if text[-1] not in ".!?":
+            text += "."
+    return text
+
+
+def _clean_skill(skill: str) -> str:
+    import re
+    skill = re.sub(r"\s+", " ", str(skill or "")).strip(" ,;|")
+    return skill
+
+
+def _dedupe_preserve_order(items: list[str]) -> list[str]:
+    seen = set()
+    result = []
+    for item in items:
+        key = item.lower().strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        result.append(item)
+    return result
+
+
+def _reduce_repeated_start(text: str, used_starts: dict) -> str:
+    alternatives = {
+        "developed": "Built",
+        "implemented": "Delivered",
+        "created": "Designed",
+        "managed": "Led",
+        "worked": "Contributed",
+        "used": "Applied",
+        "improved": "Enhanced",
+        "optimized": "Streamlined",
+    }
+    words = text.split()
+    if not words:
+        return text
+    start = words[0].lower().strip(",.;:")
+    used_starts[start] = used_starts.get(start, 0) + 1
+    if used_starts[start] > 1 and start in alternatives:
+        words[0] = alternatives[start]
+        return " ".join(words)
+    return text
+
+
+def _resume_data_to_text(data: dict) -> str:
+    lines = [data.get("full_name", "").strip()]
+    contact = data.get("contact", {})
+    contact_line = " | ".join(str(contact.get(k, "")).strip() for k in ("email", "phone", "linkedin", "location") if contact.get(k))
+    if contact_line:
+        lines.append(contact_line)
+    if data.get("summary"):
+        lines.extend(["", "PROFESSIONAL SUMMARY", data["summary"]])
+    if data.get("skills"):
+        lines.extend(["", "SKILLS", ", ".join(data["skills"])])
+    if data.get("experience"):
+        lines.extend(["", "WORK EXPERIENCE"])
+        for exp in data["experience"]:
+            header = " - ".join(filter(None, [exp.get("title", ""), exp.get("company", "")]))
+            dates = " - ".join(filter(None, [exp.get("start_date", ""), exp.get("end_date", "")]))
+            lines.append(header)
+            if dates or exp.get("location"):
+                lines.append(" | ".join(filter(None, [dates, exp.get("location", "")])))
+            lines.extend(f"- {bullet}" for bullet in exp.get("bullets", []))
+    if data.get("projects"):
+        lines.extend(["", "PROJECTS"])
+        for project in data["projects"]:
+            lines.append(project.get("name", "Project"))
+            if project.get("description"):
+                lines.append(project["description"])
+            if project.get("technologies"):
+                lines.append("Technologies: " + ", ".join(project["technologies"]))
+    if data.get("education"):
+        lines.extend(["", "EDUCATION"])
+        for edu in data["education"]:
+            lines.append(" - ".join(filter(None, [edu.get("degree", ""), edu.get("institution", ""), edu.get("year", "")])))
+    return "\n".join(line for line in lines if line is not None).strip()
+
+
+def _repair_resume_context(original_text: str, current_text: str) -> str:
+    return (
+        "ORIGINAL RESUME FACTS - use these as the truth source and do not invent beyond them:\n"
+        f"{original_text[:5000]}\n\n"
+        "CURRENT OPTIMIZED DRAFT THAT FAILED STRICT ATS CHECKS - repair this draft:\n"
+        f"{current_text[:5000]}"
+    )
+
+
+def _guess_name(text: str) -> str:
+    for line in text.splitlines()[:8]:
+        clean = line.strip()
+        if clean and "@" not in clean and not any(ch.isdigit() for ch in clean) and len(clean.split()) <= 5:
+            return clean
+    return "Candidate"
+
+
+def _job_to_description(job: dict) -> str:
+    parts = [
+        f"Title: {job.get('title', '')}",
+        f"Company: {job.get('company', '')}",
+        f"Location: {job.get('location', '')}",
+        job.get("description", ""),
+    ]
+    if job.get("requirements"):
+        parts.append("Requirements: " + ", ".join(str(item) for item in job["requirements"]))
+    if job.get("required_skills"):
+        parts.append("Required skills: " + ", ".join(str(item) for item in job["required_skills"]))
+    if job.get("nice_to_have_skills"):
+        parts.append("Nice to have: " + ", ".join(str(item) for item in job["nice_to_have_skills"]))
+    return "\n".join(part for part in parts if part)
+
+
+def _extract_contact_from_text(text: str) -> dict:
+    import re
+    email = re.search(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b", text)
+    phone = re.search(r"(\+?\d[\d().\-\s]{7,}\d)", text)
+    linkedin = re.search(r"(?:https?://)?(?:www\.)?linkedin\.com/in/[\w-]+", text, re.IGNORECASE)
+    return {
+        "email": email.group(0) if email else "",
+        "phone": phone.group(0).strip() if phone else "",
+        "linkedin": linkedin.group(0) if linkedin else "",
+        "location": "",
+    }
+
+
+def _optimized_filename(filename: str) -> str:
+    stem = filename.rsplit(".", 1)[0] if "." in filename else filename
+    return f"optimized_{stem}.docx"
+
+
+def _safe_file_size(file_path: str) -> int:
+    import os
+    try:
+        return os.path.getsize(file_path)
+    except OSError:
+        return 0
+
+
+def _quality_audit_passed(ai_data: dict) -> bool:
+    audit = ai_data.get("quality_audit") or {}
+    if not audit:
+        return False
+    required_flags = (
+        "contact_ready",
+        "section_ready",
+        "impact_ready",
+        "grammar_ready",
+        "repetition_ready",
+        "tailoring_ready",
+    )
+    flags_ok = all(bool(audit.get(flag)) for flag in required_flags)
+    try:
+        estimated_score = float(audit.get("estimated_external_checker_score", 0) or 0)
+    except (TypeError, ValueError):
+        estimated_score = 0.0
+    return flags_ok and estimated_score >= 80
+
+
+async def _score_optimized_resume(
+    orchestrator: AIOrchestrator,
+    user_id: str,
+    resume_text: str,
+    job_description: str,
+) -> dict:
+    result = await orchestrator.execute(
+        agent_name="ats_agent",
+        task="score",
+        user_id=user_id,
+        payload={
+            "resume_text": resume_text,
+            "job_description": job_description,
+        },
+        store_result=False,
+    )
+    return result.data if result.success else {
+        "ats_score": 0.0,
+        "missing_keywords": [],
+        "formatting_issues": [result.error or "ATS scoring failed"],
+        "improvement_plan": [],
+        "predicted_pass_rate": 0.0,
+    }
+
+
+def _job_description_with_ats_feedback(job_description: str, ats_result: dict) -> str:
+    missing_keywords = ", ".join(ats_result.get("missing_keywords", [])[:20]) or "None"
+    formatting_issues = ", ".join(ats_result.get("formatting_issues", [])[:10]) or "None"
+    improvement_plan = "; ".join(
+        str(item.get("action", item)) for item in ats_result.get("improvement_plan", [])[:8]
+    ) or "Improve keyword alignment, section clarity, and measurable impact."
+    return (
+        f"{job_description}\n\n"
+        "ATS OPTIMIZATION FEEDBACK FOR REPAIR PASS:\n"
+        f"- Current projected ATS score: {ats_result.get('ats_score', 0)}/100\n"
+        "- Required internal target: 90+/100 where truthful based on the candidate's original experience.\n"
+        "- External checker target: 80+ in content, ATS essentials, HR red flags, discrimination safety, seniority, tailoring, grammar, repetition, and quantified impact.\n"
+        "- Required standard sections in generated document: Contact, Professional Summary, Skills, Work Experience, Projects when useful, Education, Certifications when present.\n"
+        f"- Missing or weak keywords to naturally include if truthful: {missing_keywords}\n"
+        f"- Formatting/section issues to fix: {formatting_issues}\n"
+        f"- Priority fixes: {improvement_plan}\n"
+        "- Mandatory repair checklist: improve quantified impact, remove repeated words/action verbs, fix spelling and grammar, make bullet punctuation consistent, strengthen ATS essentials, reduce HR red flags, and improve seniority/tailoring language.\n"
+        "Rewrite again to close these gaps without inventing employers, titles, dates, degrees, tools, or exact metrics."
     )
 
 

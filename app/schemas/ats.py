@@ -5,8 +5,7 @@ from typing import Optional
 
 class ATSScoreRequest(BaseModel):
     resume_id: str
-    job_description: str
-    job_id: Optional[str] = None
+    job_description: Optional[str] = None
 
 
 class ATSScoreResponse(BaseModel):

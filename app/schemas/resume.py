@@ -37,7 +37,7 @@ class ResumeAnalysisResponse(BaseModel):
 
 
 class ResumeOptimizeRequest(BaseModel):
-    job_description: str
+    job_description: Optional[str] = None
     target_role: Optional[str] = None
 
 

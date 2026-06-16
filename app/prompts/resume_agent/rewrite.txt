@@ -9,25 +9,59 @@ ORIGINAL RESUME TEXT:
 TARGET JOB DESCRIPTION:
 {job_description}
 
-Rewrite this resume to maximize alignment with the target job description while staying 100% truthful to the candidate's actual experience (never invent companies, titles, or experience that wasn't present in the original). Think step by step:
+Rewrite this resume to maximize alignment with the target job description while staying 100% truthful to the candidate's actual experience (never invent companies, titles, dates, degrees, employers, certifications, or tools that were not present or clearly implied by the original resume). Think step by step:
 1. Identify the key skills and keywords from the job description that are missing or under-emphasized in the original resume.
-2. Rewrite each experience bullet using the format: Action Verb + Task + Quantifiable Result, incorporating relevant keywords naturally.
-3. Rewrite the professional summary to directly speak to this target role.
-4. Reorder or re-emphasize skills to match job priorities.
-5. List every concrete change you made so the user understands what changed and why.
+2. Rewrite each experience bullet using this format wherever truthful: Action Verb + Scope/Tool + Business or Technical Outcome + Metric. If exact numbers are not present, use truthful scale indicators from the resume such as "multiple", "cross-functional", "production", "client-facing", or omit the metric rather than inventing one.
+3. Make every bullet start with a distinct strong action verb. Avoid repeated starts like "Responsible for", "Worked on", "Helped", "Implemented" too many times.
+4. Rewrite the professional summary to directly speak to the target role in 3-4 lines with seniority, domain, strongest tools, and value delivered.
+5. Reorder or re-emphasize skills to match job priorities. Use clean skill names, no duplicates, no inflated buzzwords, and include exact JD keywords only when truthful.
+6. Fix ATS blockers and external checker issues: missing contact details, missing standard section headings, weak summary, low content depth, missing measurable impact, repeated wording, grammar/spelling mistakes, inconsistent bullet punctuation, unclear dates, keyword gaps, irrelevant skills, HR red flags, and discrimination-sensitive personal details.
+7. Use the exact standard section strategy expected by common ATS/checkers: Contact, Professional Summary, Skills, Work Experience, Projects if useful, Education, Certifications if present.
+8. Target a strong external-checker result: content quality 80+, ATS essentials 80+, HR red flags 80+, tailoring 80+, and overall ATS/recruiter score 85+ where truthful evidence supports it. Do not claim this score in the resume text.
+9. Before returning JSON, self-audit the rewrite against Enhancv/Jobscan/ResumeWorded-style checks: contact completeness, section completeness, quantified impact, repetition, spelling/grammar, bullet consistency, seniority alignment, tailoring, and parse safety. Revise internally until no obvious issue remains.
+10. List every concrete change you made so the user understands what changed and why.
+
+Hard output rules:
+- No tables, columns, icons, emojis, headshots, charts, text boxes, or decorative symbols.
+- Use standard headings only.
+- Summary must not be generic.
+- Skills must be 12-28 targeted skills grouped only by relevance in the list order; no duplicates.
+- Each recent role should ideally have 4-6 bullets if the original has enough detail; older/less relevant roles can have 2-4.
+- Each bullet should be one line where possible, 14-28 words, with consistent punctuation.
+- At least 60% of experience/project bullets should show measurable impact, scale, quality, speed, automation, cost, reliability, users, clients, revenue, accuracy, throughput, or time saved when truthful.
+- If exact numbers are unavailable, still strengthen impact with truthful non-numeric outcomes such as production readiness, stakeholder adoption, reduced manual work, improved reliability, faster workflows, cleaner reporting, better maintainability, or stronger user experience.
+- Remove grammar/spelling errors and repeated phrases.
+- Keep all content truthful and conservative.
 
 Return a JSON object with EXACTLY this structure and nothing else:
 {
+  "full_name": "<candidate name from original resume, blank if unknown>",
+  "contact": {"email": "<email>", "phone": "<phone>", "linkedin": "<linkedin>", "location": "<location>"},
   "rewritten_summary": "<new professional summary>",
   "rewritten_experience": [
     {
       "title": "<original title>",
       "company": "<original company>",
+      "start_date": "<start date if present>",
+      "end_date": "<end date if present or Present>",
+      "location": "<location if present>",
       "bullets": ["<rewritten bullet 1>", "<rewritten bullet 2>", "..."]
     }
   ],
   "rewritten_skills": ["<skill1>", "<skill2>", "..."],
+  "education": [{"degree": "<degree>", "institution": "<institution>", "year": "<year>"}],
+  "projects": [{"name": "<project name>", "description": "<1-2 line optimized description>", "technologies": ["<tech>"]}],
   "changes_made": ["<specific change 1>", "<specific change 2>", "..."],
   "improvement_score": <0-100 float, expected ATS/recruiter improvement>,
-  "keywords_added": ["<keyword1>", "..."]
+  "keywords_added": ["<keyword1>", "..."],
+  "remaining_risks": ["<truthful limitation or missing proof still present>", "..."],
+  "quality_audit": {
+    "contact_ready": true/false,
+    "section_ready": true/false,
+    "impact_ready": true/false,
+    "grammar_ready": true/false,
+    "repetition_ready": true/false,
+    "tailoring_ready": true/false,
+    "estimated_external_checker_score": <0-100 float>
+  }
 }

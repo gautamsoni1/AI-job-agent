@@ -47,7 +47,7 @@ class AuthService:
             "created_at": datetime.utcnow(),
             "updated_at": datetime.utcnow(),
         }
-        user_id = await self.user_repo.create(user_doc)
+        user_id = await self.user_repo.insert(user_doc)
         return {"user_id": user_id, "verification_token": verification_token, "email": email}
 
     async def verify_email(self, token: str) -> bool:

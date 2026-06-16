@@ -41,9 +41,10 @@ class ResumeAgent(BaseAgent):
         )
         system_prompt = (
             "You are a Senior Resume Writer specializing in ATS-optimized, achievement-driven rewrites. "
+            "Optimize for strict external resume checkers such as Enhancv, Jobscan, and ResumeWorded. "
             "Never invent experience the candidate doesn't have. Respond with valid JSON only."
         )
-        result = await self._call_groq_json(system_prompt, prompt, temperature=0.35)
+        result = await self._call_groq_json(system_prompt, prompt, temperature=0.2)
         return self._normalize_rewrite(result)
 
     async def find_weaknesses(self, resume_text: str, memory: UserMemory) -> dict:
@@ -94,6 +95,12 @@ class ResumeAgent(BaseAgent):
                 "clarity_score": float(analysis.get("clarity_score", 0) or 0),
                 "role_alignment_score": float(analysis.get("role_alignment_score", 0) or 0),
                 "summary": analysis.get("summary", ""),
+                "ats_blockers": analysis.get("ats_blockers", []) or [],
+                "section_diagnostics": analysis.get("section_diagnostics", {}) or {},
+                "critical_issues": analysis.get("critical_issues", []) or [],
+                "moderate_issues": analysis.get("moderate_issues", []) or [],
+                "minor_issues": analysis.get("minor_issues", []) or [],
+                "quick_wins": analysis.get("quick_wins", []) or [],
             },
             "strengths": result.get("strengths", []) or [],
             "weaknesses": result.get("weaknesses", []) or [],
@@ -103,12 +110,18 @@ class ResumeAgent(BaseAgent):
 
     def _normalize_rewrite(self, result: dict) -> dict:
         return {
+            "full_name": result.get("full_name", ""),
+            "contact": result.get("contact", {}) or {},
             "rewritten_summary": result.get("rewritten_summary", ""),
             "rewritten_experience": result.get("rewritten_experience", []) or [],
             "rewritten_skills": result.get("rewritten_skills", []) or [],
+            "education": result.get("education", []) or [],
+            "projects": result.get("projects", []) or [],
             "changes_made": result.get("changes_made", []) or [],
             "improvement_score": float(result.get("improvement_score", 0) or 0),
             "keywords_added": result.get("keywords_added", []) or [],
+            "remaining_risks": result.get("remaining_risks", []) or [],
+            "quality_audit": result.get("quality_audit", {}) or {},
         }
 
     def _normalize_weaknesses(self, result: dict) -> dict:

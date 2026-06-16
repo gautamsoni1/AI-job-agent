@@ -12,6 +12,7 @@ logger = structlog.get_logger(__name__)
 
 class BaseRepository:
     def __init__(self, db: AsyncIOMotorDatabase, collection_name: str):
+        self.db = db
         self.collection = db[collection_name]
         self.collection_name = collection_name
 

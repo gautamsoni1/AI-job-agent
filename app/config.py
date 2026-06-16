@@ -35,6 +35,8 @@ class Settings(BaseSettings):
     APIFY_TOKEN: str = ""
     APIFY_LINKEDIN_ACTOR: str = ""  # apify/linkedin-jobs-scraper no longer exists — pick a live one from Apify Store
     APIFY_INDEED_ACTOR: str = "misceres/indeed-scraper"  # verified live and maintained
+    APIFY_NAUKRI_ACTOR: str = ""
+    APIFY_GLASSDOOR_ACTOR: str = ""
 
     # Google Sheets (free — Sheets API has no billing requirement at this volume)
     GOOGLE_SHEET_ID: str = ""

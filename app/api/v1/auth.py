@@ -1,7 +1,8 @@
 """
 Auth API Endpoints — Registration, Login, Token Refresh, Password Management
 """
-from fastapi import APIRouter, Depends, BackgroundTasks
+from fastapi import APIRouter, Depends, BackgroundTasks, Response
+from fastapi.security import OAuth2PasswordRequestForm
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.core.dependencies import get_db, get_current_user
@@ -55,9 +56,32 @@ async def verify_email(token: str, db: AsyncIOMotorDatabase = Depends(get_db)):
 
 
 @router.post("/login", response_model=TokenResponse)
-async def login(body: LoginRequest, db: AsyncIOMotorDatabase = Depends(get_db)):
+async def login(body: LoginRequest, response: Response, db: AsyncIOMotorDatabase = Depends(get_db)):
     svc = get_auth_service(db)
     result = await svc.login(body.email, body.password)
+    response.set_cookie(
+        key="access_token",
+        value=result["access_token"],
+        httponly=True,
+        samesite="lax",
+    )
+    return result
+
+
+@router.post("/token", response_model=TokenResponse)
+async def login_for_docs(
+    response: Response,
+    form_data: OAuth2PasswordRequestForm = Depends(),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    svc = get_auth_service(db)
+    result = await svc.login(form_data.username, form_data.password)
+    response.set_cookie(
+        key="access_token",
+        value=result["access_token"],
+        httponly=True,
+        samesite="lax",
+    )
     return result
 
 
@@ -77,11 +101,13 @@ async def refresh_tokens(body: RefreshRequest, db: AsyncIOMotorDatabase = Depend
 @router.post("/logout")
 async def logout(
     body: RefreshRequest,
+    response: Response,
     current_user: dict = Depends(get_current_user),
     db: AsyncIOMotorDatabase = Depends(get_db),
 ):
     svc = get_auth_service(db)
     await svc.logout(str(current_user["_id"]), body.refresh_token)
+    response.delete_cookie("access_token")
     return {"success": True, "message": "Logged out successfully."}
 
 

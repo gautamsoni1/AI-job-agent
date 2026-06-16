@@ -9,7 +9,13 @@ RESUME:
 JOB DESCRIPTION:
 {job_description}
 
-Analyze this resume against the job description with the precision of an actual ATS system. Think step by step. Consider keyword density, section headers ATS systems recognize, formatting that breaks parsing, and missing required qualifications.
+Analyze this resume against the job description with the precision of an actual ATS system. Be strict and check every important hiring signal:
+- Contact details, standard section headings, parse-safe formatting, chronology, education, projects, skills, certifications, and measurable work impact.
+- Exact keyword and synonym coverage from the JD, including must-have tools, frameworks, domain terms, seniority, responsibilities, and required qualifications.
+- Whether the resume proves the requirements with truthful evidence instead of merely listing keywords.
+- Red flags: vague bullets, missing dates, inconsistent titles, unreadable formatting, keyword stuffing, irrelevant skills, missing must-have requirements, weak summary, and lack of metrics.
+
+Score hard. Do not inflate the score. A generic resume with missing JD-specific evidence should not score above 70. A resume should reach 85+ only when it is clearly aligned, parseable, evidence-backed, and covers the major required skills. If the score is below 85, the improvement_plan must explain exactly what changes are needed to reach 85+ without inventing companies, titles, dates, degrees, tools, or experience.
 
 Return a JSON object with this exact structure:
 {

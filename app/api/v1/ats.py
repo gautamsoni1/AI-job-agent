@@ -6,9 +6,10 @@ from fastapi import APIRouter, Depends, BackgroundTasks
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.core.dependencies import get_db, get_current_user
-from app.core.exceptions import NotFoundError
+from app.core.exceptions import NotFoundError, ValidationError
 from app.repositories.resume_repo import ResumeRepository
 from app.repositories.ats_repo import ATSRepository
+from app.repositories.job_repo import JobRepository
 from app.schemas.ats import ATSScoreRequest, ATSScoreResponse, ATSTrendResponse, ATSTrendItem
 from app.ai.orchestrator import AIOrchestrator
 
@@ -27,6 +28,16 @@ async def score_resume(
     if not resume or resume.get("user_id") != str(current_user["_id"]):
         raise NotFoundError("Resume", body.resume_id)
 
+    job_description = body.job_description or ""
+    if not job_description.strip():
+        job_repo = JobRepository(db)
+        jobs = await job_repo.find_by_user(str(current_user["_id"]), limit=1)
+        if jobs:
+            job = jobs[0]
+            job_description = _job_to_description(job)
+    if not job_description.strip():
+        raise ValidationError("No job found for this user. Add a job first or provide job_description.")
+
     orchestrator = AIOrchestrator(db)
     result = await orchestrator.execute(
         agent_name="ats_agent",
@@ -34,16 +45,17 @@ async def score_resume(
         user_id=str(current_user["_id"]),
         payload={
             "resume_text": resume.get("raw_text", ""),
-            "job_description": body.job_description,
+            "job_description": job_description,
         },
     )
+    if not result.success:
+        raise ValidationError(f"ATS scoring failed: {result.error or 'AI service error'}")
 
     data = result.data
     report_doc = {
         "user_id": str(current_user["_id"]),
         "resume_id": body.resume_id,
-        "job_id": body.job_id,
-        "job_description_snippet": body.job_description[:200],
+        "job_description_snippet": job_description[:200],
         "ats_score": data.get("ats_score", 0.0),
         "keyword_coverage": data.get("keyword_coverage", {}),
         "missing_keywords": data.get("missing_keywords", []),
@@ -183,3 +195,19 @@ async def _log_timeline(db, user_id: str, event_type: str, title: str, metadata:
         "metadata": metadata,
         "created_at": datetime.utcnow(),
     })
+
+
+def _job_to_description(job: dict) -> str:
+    parts = [
+        f"Title: {job.get('title', '')}",
+        f"Company: {job.get('company', '')}",
+        f"Location: {job.get('location', '')}",
+        job.get("description", ""),
+    ]
+    if job.get("requirements"):
+        parts.append("Requirements: " + ", ".join(str(item) for item in job["requirements"]))
+    if job.get("required_skills"):
+        parts.append("Required skills: " + ", ".join(str(item) for item in job["required_skills"]))
+    if job.get("nice_to_have_skills"):
+        parts.append("Nice to have: " + ", ".join(str(item) for item in job["nice_to_have_skills"]))
+    return "\n".join(part for part in parts if part)

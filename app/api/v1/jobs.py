@@ -1,6 +1,8 @@
 """
 Jobs API Endpoints — Discovery, Listing, Scouting, Matching, Saving
 """
+import re
+from ast import literal_eval
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, BackgroundTasks, Query
 from motor.motor_asyncio import AsyncIOMotorDatabase
@@ -210,9 +212,69 @@ def _to_job_response(j: dict) -> dict:
     j = dict(j)
     if "_id" in j:
         j["id"] = str(j.pop("_id"))
+    j["title"] = _display_value(j.get("title"), "Role not provided")
+    j["company"] = _display_value(j.get("company"), "Company not provided")
+    j["location"] = _display_value(j.get("location"), "Location not provided")
+    j["description"] = _plain_text(j.get("description"), "Description not provided")
+    j["experience_required"] = _display_value(j.get("experience_required"), "Experience not provided")
+    j["salary_range"] = _display_value(j.get("salary_range"), "Salary not provided")
+    j["employment_type"] = _display_value(j.get("employment_type"), "Employment type not provided")
+    j["work_type"] = _display_value(j.get("work_type"), "Work type not provided")
+    j["apply_link"] = _display_value(j.get("apply_link"), "Apply link not provided")
+    j["source"] = _display_value(j.get("source"), "Source not provided")
+    j["deadline"] = _display_value(j.get("deadline"), "Deadline not provided")
+    j["bond"] = _display_value(j.get("bond"), "Bond not provided")
+    j["package"] = _display_value(j.get("package"), "Package not provided")
+    j["company_logo"] = _display_value(j.get("company_logo"), "Company logo not provided")
+    j.setdefault("required_skills", [])
+    j["salary_min"] = _display_value(j.get("salary_min"), "Salary min not provided")
+    j["salary_max"] = _display_value(j.get("salary_max"), "Salary max not provided")
+    j.setdefault("scout_report", {})
+    j.setdefault("discovered_at", j.get("created_at") or j.get("fetched_at") or datetime.utcnow())
+    j["posted_date"] = _display_value(j.get("posted_date") or j.get("posted_at"), "Posted date not provided")
     for key in ("raw_data", "fetched_at"):
         j.pop(key, None)
     return j
+
+
+def _display_value(value, fallback: str) -> str:
+    if value is None:
+        return fallback
+    if isinstance(value, str) and value.strip().startswith("{"):
+        try:
+            value = literal_eval(value)
+        except (ValueError, SyntaxError):
+            pass
+    if isinstance(value, str) and not value.strip():
+        return fallback
+    if isinstance(value, dict):
+        for key in ("name", "title", "value", "text"):
+            if value.get(key):
+                return str(value[key])
+        return fallback
+    if isinstance(value, list):
+        return ", ".join(str(item) for item in value if item) or fallback
+    return str(value)
+
+
+def _plain_text(value, fallback: str) -> str:
+    text = _display_value(value, fallback)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text or fallback
+
+
+def _parse_job_datetime(value):
+    if isinstance(value, datetime):
+        return value
+    if not value:
+        return None
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    return None
 
 
 async def _sync_to_sheets(job: dict, match_score: float = 0.0, ats_score: float = 0.0):
@@ -223,6 +285,13 @@ async def _sync_to_sheets(job: dict, match_score: float = 0.0, ats_score: float 
         return
     try:
         sheets = GoogleSheetsService()
+        duplicate = await sheets.check_duplicate(
+            job.get("company") or "Company not provided",
+            job.get("title") or "Role not provided",
+            job.get("apply_link") or "",
+        )
+        if duplicate:
+            return
         await sheets.sync_job(job, match_score=match_score, ats_score=ats_score)
     except Exception as e:
         import structlog
@@ -239,9 +308,17 @@ async def _run_job_discovery(db, user_id: str, keywords: list, locations: list, 
         for raw_job in raw_jobs:
             raw_job["user_id"] = user_id
             raw_job["created_at"] = datetime.now(timezone.utc)
+            raw_job["discovered_at"] = raw_job["created_at"]
             raw_job["updated_at"] = datetime.now(timezone.utc)
             raw_job["is_saved"] = False
             raw_job["is_deleted"] = False
+            raw_job.setdefault("required_skills", [])
+            raw_job.setdefault("salary_min", None)
+            raw_job.setdefault("salary_max", None)
+            raw_job.setdefault("work_type", "Work type not provided")
+            raw_job.setdefault("bond", "Bond not provided")
+            raw_job.setdefault("package", "Package not provided")
+            raw_job.setdefault("posted_date", _parse_job_datetime(raw_job.get("posted_at")))
 
             existing = await repo.check_duplicate(user_id, raw_job.get("apply_link", ""))
             if existing:

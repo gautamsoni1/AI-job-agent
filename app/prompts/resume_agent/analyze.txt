@@ -15,6 +15,8 @@ Analyze this resume deeply. Think step by step:
 4. Identify the candidate's strongest selling points.
 5. Identify weaknesses that would cause a recruiter to pass on this resume in under 10 seconds.
 6. Assess fit against the user's stated career goals and preferred roles from their context.
+7. Detect ATS blockers including missing standard headings, tables/columns risk, keyword gaps, weak section order, buzzwords, grammar issues, repeated claims, missing metrics, and unclear dates.
+8. Separate critical, moderate, and minor problems so small and large mistakes are both visible.
 
 Return a JSON object with EXACTLY this structure and nothing else:
 {
@@ -24,7 +26,19 @@ Return a JSON object with EXACTLY this structure and nothing else:
     "impact_score": <0-100 float>,
     "clarity_score": <0-100 float>,
     "role_alignment_score": <0-100 float>,
-    "summary": "<2-3 sentence expert overview of this resume>"
+    "summary": "<2-3 sentence expert overview of this resume>",
+    "ats_blockers": ["<specific ATS/parser issue>", "..."],
+    "section_diagnostics": {
+      "summary": ["<issue or improvement>"],
+      "experience": ["<issue or improvement>"],
+      "skills": ["<issue or improvement>"],
+      "education": ["<issue or improvement>"],
+      "formatting": ["<issue or improvement>"]
+    },
+    "critical_issues": ["<must fix issue>", "..."],
+    "moderate_issues": ["<important issue>", "..."],
+    "minor_issues": ["<small polish issue>", "..."],
+    "quick_wins": ["<fix that can be done quickly>", "..."]
   },
   "strengths": ["<specific strength 1>", "<specific strength 2>", "..."],
   "weaknesses": ["<specific weakness 1>", "<specific weakness 2>", "..."],

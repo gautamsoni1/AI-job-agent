@@ -1,3 +1,5 @@
+import re
+from ast import literal_eval
 from datetime import datetime
 from typing import Optional
 
@@ -67,27 +69,27 @@ class GoogleSheetsService:
             await self.ensure_header()
             service = self._get_service()
             row = [
-                job.get("company", ""),
-                job.get("title", ""),
-                job.get("location", ""),
-                job.get("experience_required", ""),
-                job.get("salary_range", ""),
-                "",  # Package (filled later)
-                ", ".join(job.get("required_skills", [])),
+                self._value(job.get("company"), "Company not provided"),
+                self._value(job.get("title"), "Role not provided"),
+                self._value(job.get("location"), "Location not provided"),
+                self._value(job.get("experience_required"), "Experience not provided"),
+                self._value(job.get("salary_range"), "Salary not provided"),
+                self._value(job.get("package") or job.get("bond"), "Package/bond not provided"),
+                self._skills(job.get("required_skills")),
                 str(round(match_score, 1)),
                 str(round(ats_score, 1)),
-                job.get("apply_link", ""),
-                job.get("deadline", ""),
-                job.get("source", ""),
-                str(job.get("posted_at", "")),
+                self._value(job.get("apply_link"), "Apply link not provided"),
+                self._value(job.get("deadline"), "Deadline not provided"),
+                self._value(job.get("source"), "Source not provided"),
+                self._value(job.get("posted_at") or job.get("posted_date"), "Posted date not provided"),
                 "New",
-                "",  # Notes
+                self._notes(job),
                 datetime.utcnow().strftime("%Y-%m-%d"),
                 "Not Applied",
-                "",  # Resume version
-                "",  # Cover letter version
-                "",  # Interview date
-                "",  # Offer status
+                "Resume version not selected",
+                "Cover letter not generated",
+                "Interview not scheduled",
+                "Offer not received",
                 datetime.utcnow().strftime("%Y-%m-%d %H:%M"),
             ]
             result = service.spreadsheets().values().append(
@@ -104,6 +106,35 @@ class GoogleSheetsService:
         except Exception as e:
             logger.error("sheets_sync_failed", error=str(e))
             return {"success": False, "error": str(e)}
+
+    def _value(self, value, fallback: str) -> str:
+        if value is None:
+            return fallback
+        if isinstance(value, str) and value.strip().startswith("{"):
+            try:
+                value = literal_eval(value)
+            except (ValueError, SyntaxError):
+                pass
+        if isinstance(value, str) and not value.strip():
+            return fallback
+        if isinstance(value, dict):
+            for key in ("name", "title", "value", "text"):
+                if value.get(key):
+                    return str(value[key])
+            return fallback
+        if isinstance(value, list):
+            return ", ".join(str(item) for item in value if item) or fallback
+        return str(value)
+
+    def _skills(self, skills) -> str:
+        return self._value(skills, "Skills not provided")
+
+    def _notes(self, job: dict) -> str:
+        description = re.sub(r"<[^>]+>", " ", self._value(job.get("description"), "Description not provided"))
+        description = re.sub(r"\s+", " ", description).strip()
+        employment = self._value(job.get("employment_type"), "Employment type not provided")
+        work_type = self._value(job.get("work_type"), "Work type not provided")
+        return f"{employment}; {work_type}; {description[:500]}"
 
     async def update_application_status(self, row_number: int, status: str) -> bool:
         try:
