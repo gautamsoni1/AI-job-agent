@@ -3,6 +3,7 @@ Pipeline Service — single orchestrator: resume parse → AI analyze → ATS
 score/auto-improve → domain-accurate, experience-matched, de-duplicated job
 discovery/scouting/matching → sheet export → honest apply.
 """
+import re
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -13,11 +14,13 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 from app.config import get_settings
 from app.core.exceptions import NotFoundError
 from app.ai.orchestrator import AIOrchestrator
+from app.models import user
 from app.repositories.resume_repo import ResumeRepository
 from app.repositories.job_repo import JobRepository
 from app.repositories.application_repo import ApplicationRepository
 from app.repositories.ats_repo import ATSRepository
 from app.repositories.pipeline_repo import PipelineRunRepository
+from app.schemas import job, pipeline
 from app.services.storage_service import StorageService
 from app.services.resume_parser_service import ResumeParserService
 from app.services.resume_generator_service import ResumeGeneratorService
@@ -42,12 +45,19 @@ from app.api.v1.resume import (
 )
 from app.api.v1.jobs import _to_job_response
 
+from app.utils.experience_utils import (
+    infer_experience_years,
+    experience_level_for,
+    is_job_suitable_for_candidate,
+)
+from app.utils.date_utils import is_recently_posted
+
 logger = structlog.get_logger()
 settings = get_settings()
 
 ATS_TARGET_SCORE = 80
-MAX_ATS_ITERATIONS = 2
-MIN_OVERALL_MATCH = 40  # AI match score below this = not relevant enough, dropped
+MAX_ATS_ITERATIONS = 3
+MIN_OVERALL_MATCH = 50  # AI match score below this = not relevant enough, dropped
 
 
 class PipelineService:
@@ -140,74 +150,53 @@ class PipelineService:
         )
         ats_data = ats_result.data
         initial_ats_score = ats_data.get("ats_score", 0.0)
-
+        
+        best_score = initial_ats_score
+        best_text = current_text
+        best_resume_doc = latest_resume_doc
+        best_resume_id = latest_resume_id
+        best_ats_data = ats_data
+        
         while ats_data.get("ats_score", 0) < ATS_TARGET_SCORE and iteration < MAX_ATS_ITERATIONS:
             iteration += 1
-            jd_for_rewrite = effective_jd if iteration == 1 else _job_description_with_ats_feedback(effective_jd, ats_data)
-            text_for_rewrite = current_text if iteration == 1 else _repair_resume_context(resume_doc["raw_text"], current_text)
-
-            rewrite_result = await self.orchestrator.execute(
-                agent_name="resume_agent", task="rewrite", user_id=user_id,
-                payload={"resume_text": text_for_rewrite, "job_description": jd_for_rewrite},
-            )
-            if not rewrite_result.success:
-                break
-
-            optimized_data = _build_optimized_resume_data(latest_resume_doc, rewrite_result.data)
-            optimized_text = _resume_data_to_text(optimized_data)
-            generator = ResumeGeneratorService()
-            generated_path = await generator.generate_docx(optimized_data, user_id)
-
-            new_doc = {
-                "user_id": user_id,
-                "filename": _optimized_filename(latest_resume_doc.get("filename", "resume")),
-                "file_path": latest_resume_doc.get("file_path", ""),
-                "generated_file_path": generated_path,
-                "generated_file_type": "docx",
-                "file_type": "docx",
-                "file_size": _safe_file_size(generated_path),
-                "raw_text": optimized_text,
-                "parsed_sections": {
-                    "summary": optimized_data.get("summary", ""),
-                    "experience": optimized_data.get("experience", []),
-                    "education": optimized_data.get("education", []),
-                    "projects": optimized_data.get("projects", []),
-                    "skills": optimized_data.get("skills", []),
-                },
-                "skills_extracted": rewrite_result.data.get("rewritten_skills", []),
-                "is_active": False,
-                "version_number": latest_resume_doc.get("version_number", version_number) + 1,
-                "label": f"Pipeline Auto-Optimized (iter {iteration})",
-                "parent_resume_id": resume_id,
-                "created_at": now,
-                "updated_at": now,
-            }
-            new_id = await self.resume_repo.insert(new_doc)
-            await self.resume_repo.save_version({
-                "resume_id": new_id, "root_resume_id": resume_id, "parent_resume_id": resume_id,
-                "user_id": user_id, "version_number": new_doc["version_number"], "label": new_doc["label"],
-                "filename": new_doc["filename"], "file_path": generated_path, "file_type": "docx",
-                "generated_file_path": generated_path, "raw_text": optimized_text,
-                "parsed_sections": new_doc["parsed_sections"], "skills_extracted": new_doc["skills_extracted"],
-                "source": "pipeline_auto_rewrite", "changes_made": rewrite_result.data.get("changes_made", []),
-                "target_role": target_role, "created_at": now,
-            })
-            new_doc["_id"] = new_id
-            current_text = optimized_text
-            latest_resume_doc = new_doc
-            latest_resume_id = new_id
-
+            # ... (existing rewrite + docx generation + save_version code as-is) ...
+        
             ats_result = await self.orchestrator.execute(
                 agent_name="ats_agent", task="score", user_id=user_id,
                 payload={"resume_text": current_text, "job_description": effective_jd},
             )
             ats_data = ats_result.data
-
+        
+            if ats_data.get("ats_score", 0) > best_score:
+                best_score = ats_data.get("ats_score", 0)
+                best_text = current_text
+                best_resume_doc = latest_resume_doc
+                best_resume_id = latest_resume_id
+                best_ats_data = ats_data
+        
+        # Loop khatam hone ke baad sabse best version ko hi final maano —
+        # chahe last iteration usse kam score laaya ho.
+        current_text = best_text
+        latest_resume_doc = best_resume_doc
+        latest_resume_id = best_resume_id
+        ats_data = best_ats_data
+        
         if iteration > 0:
             await self.resume_repo.set_active(user_id, latest_resume_id)
-
+        
+        meets_ats_target = best_score >= ATS_TARGET_SCORE
+        ats_quality_warning = None
+        if not meets_ats_target:
+            ats_quality_warning = {
+                "message": "Resume optimized, but it did not reach 80 without adding unverified content.",
+                "required_score": ATS_TARGET_SCORE,
+                "projected_ats_score": best_score,
+                "remaining_issues": ats_data.get("formatting_issues", []),
+                "missing_keywords": ats_data.get("missing_keywords", []),
+                "next_step": "Add more truthful achievements, metrics, and job-specific evidence to the source resume, then re-run.",
+            }
+        
         await self._save_ats_report(user_id, latest_resume_id, effective_jd, ats_data)
-
         # 5. Domain-accurate, deduplicated, experience-matched job discovery
         candidate_years = infer_experience_years(resume_doc["raw_text"])
         candidate_level = experience_level_for(candidate_years)
@@ -234,8 +223,14 @@ class PipelineService:
             if not self._looks_relevant(raw_job, resume_skill_set, role_keyword_set):
                 continue
 
-            exp_text = f"{raw_job.get('experience_required','')} {raw_job.get('description','')[:1000]}"
-            if job_requires_more_experience(exp_text, candidate_years):
+            if not self._looks_relevant(raw_job, resume_skill_set, role_keyword_set):
+                continue
+
+            if not is_job_suitable_for_candidate(raw_job, candidate_years):
+                continue
+
+            posted_value = raw_job.get("posted_at") or raw_job.get("posted_date")
+            if not is_recently_posted(posted_value, max_age_days=30):
                 continue
 
             seen_keys.add(key)
@@ -280,12 +275,16 @@ class PipelineService:
             })
             saved_jobs.append(job_with_id)
 
+            # REPLACE this inline block:
             try:
                 if settings.GOOGLE_SHEET_ID:
                     sheets = GoogleSheetsService()
                     await sheets.sync_job(job_with_id, match_score=overall_match, ats_score=ats_data.get("ats_score", 0))
             except Exception as e:
                 logger.warning("pipeline_sheets_sync_failed", error=str(e))
+            
+            # WITH this call:
+            await self._sync_to_sheets_safe(job_with_id, match_score=overall_match, ats_score=ats_data.get("ats_score", 0))
 
         saved_jobs.sort(key=lambda j: j.get("match_score", 0), reverse=True)
 
@@ -410,6 +409,23 @@ class PipelineService:
             "results": results,
             "sheet_path": sheet_path,
         }
+
+
+    async def _sync_to_sheets_safe(self, job: dict, match_score: float, ats_score: float):
+        if not settings.GOOGLE_SHEET_ID:
+            return
+        try:
+            sheets = GoogleSheetsService()
+            duplicate = await sheets.check_duplicate(
+                job.get("company") or "Company not provided",
+                job.get("title") or "Role not provided",
+                job.get("apply_link") or "",
+            )
+            if duplicate:
+                return
+            await sheets.sync_job(job, match_score=match_score, ats_score=ats_score)
+        except Exception as e:
+            logger.warning("pipeline_sheets_sync_failed", error=str(e))
 
     async def apply_to_job(self, user_id: str, pipeline_id: str, job_id: str) -> dict:
         pipeline = await self._get_owned_pipeline(user_id, pipeline_id)
@@ -636,3 +652,78 @@ class PipelineService:
             "user_id": user_id, "event_type": event_type, "title": title, "description": title,
             "metadata": metadata, "created_at": datetime.now(timezone.utc),
         })
+
+
+    async def _attempt_real_apply(self, user: dict, pipeline: dict, job: dict) -> dict:
+        user_id = str(user["_id"])
+        resume_text_for_letter = pipeline.get("final_resume_text", "")
+    
+        cl_result = await self.orchestrator.execute(
+            agent_name="cover_letter_agent", task="generate", user_id=user_id,
+            payload={
+                "resume_text": resume_text_for_letter,
+                "job": job,
+                "company_name": job.get("company", ""),
+                "tone": "professional",
+            },
+        )
+        cover_letter_text = cl_result.data.get("full_text", "") if cl_result.success else ""
+    
+        contact_email = self._extract_application_email(job)
+        if contact_email:
+            resume_bytes, resume_filename = await self._get_resume_file(
+                pipeline.get("final_resume_id") or pipeline.get("resume_id")
+            )
+            if resume_bytes:
+                email_service = EmailService()
+                sent = await email_service.send_application_email(
+                    to_email=contact_email,
+                    candidate_name=f"{user.get('first_name','')} {user.get('last_name','')}".strip(),
+                    candidate_email=user.get("email", ""),
+                    candidate_phone=user.get("phone", "") or "",
+                    role=job.get("title", ""),
+                    company=job.get("company", ""),
+                    cover_letter_text=cover_letter_text,
+                    resume_bytes=resume_bytes,
+                    resume_filename=resume_filename,
+                )
+                if sent:
+                    return {"status": "APPLIED", "reason": f"Resume emailed to {contact_email}", "cover_letter": cover_letter_text}
+                return {"status": "FAILED", "reason": "Email send failed", "cover_letter": cover_letter_text}
+    
+        return {
+            "status": "MANUAL_APPLY_REQUIRED",
+            "reason": "No recruiter email on this posting — only a portal link. Click to finish in one step.",
+            "cover_letter": cover_letter_text,
+            "apply_link": job.get("apply_link", ""),
+        }
+
+    def _extract_application_email(self, job: dict) -> Optional[str]:
+        email = extract_email(job.get("description", "") or "")
+        if email:
+            return email
+        apply_link = job.get("apply_link", "") or ""
+        if apply_link.lower().startswith("mailto:"):
+            return extract_email(apply_link[7:]) or apply_link[7:].split("?")[0].strip() or None
+        return None    
+    
+    def _looks_relevant(self, job: dict, resume_skills: set, role_keywords: set) -> bool:
+        if not resume_skills and not role_keywords:
+            return True
+    
+        title_text = (job.get("title") or "").lower()
+        desc_text = (job.get("description") or "")[:500].lower()
+
+        def _word_in(term: str, text: str) -> bool:
+            term = (term or "").strip().lower()
+            if not term:
+                return False
+            return bool(re.search(r"(?<![a-zA-Z0-9])" + re.escape(term) + r"(?![a-zA-Z0-9])", text))
+    
+        all_terms = list(role_keywords) + list(resume_skills)
+    
+        if any(_word_in(term, title_text) for term in all_terms):
+            return True
+    
+        hits = sum(1 for term in all_terms if _word_in(term, desc_text))
+        return hits >= 2

@@ -179,8 +179,9 @@ class ATSAgent(BaseAgent):
             penalty += 10
             issues.append("No bullet points detected in work history.")
 
+        # app/ai/agents/ats_agent.py — _apply_external_checker_penalties() ke andar
         grammar_patterns = [
-            r"\b(i|im|ive|dont|doesnt|cant|wont)\b",
+            r"\b(im|ive|dont|doesnt|cant|wont)\b",   # "i" hata diya
             r"\s{2,}",
             r"\b(responsible for|worked on|helped with|various things)\b",
             r"\b([A-Za-z]+)\s+\1\b",

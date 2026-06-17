@@ -213,7 +213,7 @@ class ApifyService:
             company=self._first(raw, "company", "companyName"),
             location=self._first(raw, "location", "jobLocation", "locations"),
             description=self._first(raw, "description", "jobDescription", "jd"),
-            apply_link=self._first(raw, "url", "jobUrl", "applyUrl", "link"),
+            apply_link=self._first(raw, "jdURL", "url", "jobUrl", "applyUrl", "link"),
             salary_range=self._first(raw, "salary", "salaryRange"),
             experience_required=self._first(raw, "experience", "experienceRequired"),
             employment_type=self._first(raw, "jobType", "employmentType"),
@@ -237,12 +237,15 @@ class ApifyService:
         )
 
     def _job(self, raw: dict, source: str, **fields) -> dict:
+        apply_link = fields.get("apply_link", "") or self._extract_any_url(raw)
+        if not apply_link:
+            apply_link = self._fallback_search_url(source, fields.get("title", ""), fields.get("company", ""))
         return {
             "title": fields.get("title", ""),
             "company": fields.get("company", ""),
             "location": fields.get("location", ""),
             "description": fields.get("description", ""),
-            "apply_link": fields.get("apply_link", ""),
+            "apply_link": apply_link,
             "source": source,
             "salary_range": fields.get("salary_range", ""),
             "experience_required": fields.get("experience_required", ""),
@@ -252,6 +255,30 @@ class ApifyService:
             "raw_data": raw,
             "fetched_at": datetime.utcnow(),
         }
+
+    def _extract_any_url(self, raw: dict) -> str:
+        """Named fields miss ho jaayein to kisi bhi url-jaise key ko scan
+        karo — actor schema thoda change ho to bhi link mil jaaye."""
+        for key, value in raw.items():
+            if not isinstance(value, str) or not value.startswith("http"):
+                continue
+            if any(token in key.lower() for token in ("url", "link", "apply", "jd")):
+                return value
+        return ""
+
+    def _fallback_search_url(self, source: str, title: str, company: str) -> str:
+        """Absolute last resort: koi bhi direct link na mile to user ko
+        ek direct search link de do jaha se woh khud job dhoondh ke apply
+        kar sake — pura khaali apply_link kabhi mat chhodo."""
+        from urllib.parse import quote
+        query = quote(f"{title} {company}".strip())
+        urls = {
+            "LinkedIn": f"https://www.linkedin.com/jobs/search/?keywords={query}",
+            "Indeed": f"https://in.indeed.com/jobs?q={query}",
+            "Naukri": f"https://www.naukri.com/{quote((title or '').lower().replace(' ', '-'))}-jobs",
+            "Glassdoor": f"https://www.glassdoor.co.in/Job/jobs.htm?sc.keyword={query}",
+        }
+        return urls.get(source, "")
 
     def _first(self, raw: dict, *keys: str) -> str:
         for key in keys:

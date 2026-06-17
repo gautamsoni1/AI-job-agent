@@ -90,21 +90,20 @@ class EmailService:
         self,
         to_email: str,
         candidate_name: str,
+        candidate_email: str,
+        candidate_phone: str,
         role: str,
         company: str,
         cover_letter_text: str,
         resume_bytes: bytes,
         resume_filename: str,
     ) -> bool:
-        """The only genuine 'apply' action the pipeline performs — emails
-        the tailored resume + cover letter to a real recruiter address found
-        on the posting. There is no safe, generic way to auto-fill arbitrary
-        third-party application portals."""
         safe_letter = (cover_letter_text or "").replace("\n", "<br>")
+        contact_line = " | ".join(filter(None, [candidate_email, candidate_phone]))
         html = f"""
         <html><body style="font-family:Georgia,serif;line-height:1.6;color:#222;">
         <p>{safe_letter}</p>
-        <p>— {candidate_name}</p>
+        <p>— {candidate_name}<br>{contact_line}</p>
         </body></html>
         """
         return await self._send(

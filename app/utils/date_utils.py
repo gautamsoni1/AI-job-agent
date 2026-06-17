@@ -1,8 +1,67 @@
 """
 Date/Time Utility Functions
 """
+import re
 from datetime import datetime, timezone, timedelta
 from typing import Optional
+
+
+
+def parse_flexible_date(value) -> Optional[datetime]:
+    """Best-effort parse of inconsistent posted-date formats from
+    different Apify actors (ISO strings, 'X days ago', epoch ints/ms,
+    plain dates). Returns None when genuinely unparseable."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        dt = value
+    elif isinstance(value, (int, float)):
+        try:
+            dt = datetime.utcfromtimestamp(value / 1000 if value > 1e12 else value)
+        except (ValueError, OSError, OverflowError):
+            return None
+    else:
+        text = str(value).strip()
+        relative = re.match(r'(\d+)\s*(hour|day|week|month)s?\s*ago', text.lower())
+        if relative:
+            amount, unit = int(relative.group(1)), relative.group(2)
+            delta = {
+                "hour": timedelta(hours=amount),
+                "day": timedelta(days=amount),
+                "week": timedelta(weeks=amount),
+                "month": timedelta(days=amount * 30),
+            }[unit]
+            return datetime.utcnow() - delta
+        dt = None
+        for fmt in ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+            try:
+                dt = datetime.strptime(text, fmt)
+                break
+            except ValueError:
+                continue
+        if dt is None:
+            try:
+                dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            except ValueError:
+                return None
+    if dt.tzinfo is not None:
+        dt = dt.replace(tzinfo=None)
+    # Naukri jaise scrapers kabhi-kabhi placeholder "1970-01-01" bhejte
+    # hain jab unko actual date nahi mili — usko "unknown" treat karo,
+    # "30 saal purani" nahi.
+    if dt.year <= 1971 or dt.year > datetime.utcnow().year + 1:
+        return None
+    return dt
+
+
+def is_recently_posted(posted_value, max_age_days: int = 30) -> bool:
+    """True if posting is within max_age_days. If date can't be determined
+    at all, default to keep — better than silently dropping a genuinely
+    fresh job whose scraper didn't return a clean date."""
+    dt = parse_flexible_date(posted_value)
+    if dt is None:
+        return True
+    return (datetime.utcnow() - dt).days <= max_age_days
 
 
 def utcnow() -> datetime:

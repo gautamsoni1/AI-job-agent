@@ -4,6 +4,7 @@ improve → job discovery/scouting/matching → sheets → apply-all / apply-one
 """
 import os
 from typing import Optional
+from chromadb import db
 from fastapi import APIRouter, Depends, UploadFile, File, Form
 from fastapi.responses import FileResponse
 from motor.motor_asyncio import AsyncIOMotorDatabase
@@ -69,17 +70,14 @@ async def get_pipeline(
 
 
 @router.post("/{pipeline_id}/apply-all", response_model=BulkApplyResponse)
-async def apply_all(
-    pipeline_id: str,
-    current_user: dict = Depends(get_verified_user),
-    db: AsyncIOMotorDatabase = Depends(get_db),
-):
+async def apply_all(pipeline_id: str, current_user: dict = Depends(get_verified_user), db: AsyncIOMotorDatabase = Depends(get_db)):
     service = PipelineService(db)
     result = await service.apply_to_all_jobs(str(current_user["_id"]), pipeline_id)
     return BulkApplyResponse(
         pipeline_id=pipeline_id,
         total_jobs=result["total"],
         applied_count=result["applied_count"],
+        manual_apply_count=result["manual_count"],   # ← yeh line missing thi
         failed_count=result["failed_count"],
         after_apply_sheet_url=f"/api/v1/pipeline/{pipeline_id}/download/after-apply",
         results=result["results"],
@@ -95,11 +93,20 @@ async def apply_one(
 ):
     service = PipelineService(db)
     result = await service.apply_to_job(str(current_user["_id"]), pipeline_id, job_id)
+    status = result["status"]
+    if result["already_applied"]:
+        message = f"Already on record — status: {status}."
+    elif status == "APPLIED":
+        message = "Resume + cover letter emailed directly to the recruiter."
+    elif status == "MANUAL_APPLY_REQUIRED":
+        message = "No recruiter email found on this posting — finish applying via the portal link."
+    else:
+        message = "Could not complete the application automatically — please apply manually."
     return SingleApplyResponse(
         pipeline_id=pipeline_id,
         job_id=job_id,
-        status="ALREADY_APPLIED" if result["already_applied"] else "APPLIED",
-        message="Already had an application on record." if result["already_applied"] else "Applied successfully.",
+        status=status,
+        message=message,
     )
 
 

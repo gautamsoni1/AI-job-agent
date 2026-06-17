@@ -16,6 +16,7 @@ chroma_db/
 uploads/
 generated_resumes/
 generated_cover_letters/
+test.py
 
 # Node
 node_modules/

@@ -1,9 +1,11 @@
 import re
+from fastapi import logger
+import structlog
 from datetime import datetime
 from typing import Optional
 from bson import ObjectId
 from motor.motor_asyncio import AsyncIOMotorDatabase
-
+from pymongo.errors import BulkWriteError
 from app.repositories.base import BaseRepository
 
 
@@ -94,3 +96,25 @@ class JobRepository(BaseRepository):
         return await self.collection.find_one({
             "user_id": user_id, "is_deleted": {"$ne": True}, "$or": filters,
         })
+    logger = structlog.get_logger()
+
+    async def bulk_insert_jobs(self, jobs: list[dict]) -> list[str]:
+        if not jobs:
+            return []
+        try:
+            result = await self.collection.insert_many(jobs, ordered=False)
+            return [str(id_) for id_ in result.inserted_ids]
+        except BulkWriteError as e:
+            failed_indices = {err["index"] for err in e.details.get("writeErrors", [])}
+            inserted_ids = [
+                str(job["_id"])
+                for idx, job in enumerate(jobs)
+                if idx not in failed_indices and "_id" in job
+            ]
+            logger.warning(
+                "bulk_insert_partial_failure",
+                attempted=len(jobs),
+                inserted=len(inserted_ids),
+                failed=len(failed_indices),
+            )
+            return inserted_ids
