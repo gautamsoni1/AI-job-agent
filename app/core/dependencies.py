@@ -48,3 +48,8 @@ async def get_current_admin(current_user=Depends(get_current_user)):
     if not current_user.get("is_admin", False):
         raise ForbiddenError("Admin access required")
     return current_user
+
+async def get_verified_user(current_user=Depends(get_current_user)):
+    if not current_user.get("is_verified", False):
+        raise ForbiddenError("Please verify your email before using this feature.")
+    return current_user

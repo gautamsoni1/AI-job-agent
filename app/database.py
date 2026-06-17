@@ -76,3 +76,5 @@ async def _create_indexes():
     # preference_signals
     await db.preference_signals.create_index([("user_id", 1), ("recorded_at", -1)])
     logger.info("MongoDB indexes created")
+    
+    await db.pipeline_runs.create_index([("user_id", 1), ("created_at", -1)])

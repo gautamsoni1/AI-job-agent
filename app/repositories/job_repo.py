@@ -1,3 +1,4 @@
+import re
 from datetime import datetime
 from typing import Optional
 from bson import ObjectId
@@ -76,3 +77,20 @@ class JobRepository(BaseRepository):
     async def get_all_for_admin(self, skip: int = 0, limit: int = 100) -> list[dict]:
         cursor = self.collection.find({}, sort=[("created_at", -1)]).skip(skip).limit(limit)
         return await cursor.to_list(length=limit)
+    
+    async def find_existing_similar(self, user_id: str, title: str, company: str, apply_link: str = "") -> Optional[dict]:
+        """Catches duplicates even when apply_link differs or is missing —
+        same title + company for the same user counts as the same job."""
+        filters = []
+        if apply_link:
+            filters.append({"apply_link": apply_link})
+        if title and company:
+            filters.append({
+                "title": {"$regex": f"^{re.escape(title.strip())}$", "$options": "i"},
+                "company": {"$regex": f"^{re.escape(company.strip())}$", "$options": "i"},
+            })
+        if not filters:
+            return None
+        return await self.collection.find_one({
+            "user_id": user_id, "is_deleted": {"$ne": True}, "$or": filters,
+        })

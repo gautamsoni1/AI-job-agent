@@ -1,6 +1,7 @@
 import aiosmtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from email.mime.application import MIMEApplication
 
 import structlog
 
@@ -11,13 +12,21 @@ settings = get_settings()
 
 
 class EmailService:
-    async def _send(self, to_email: str, subject: str, html_body: str) -> bool:
+    async def _send(self, to_email: str, subject: str, html_body: str, attachments: list[tuple[str, bytes]] | None = None) -> bool:
         try:
-            msg = MIMEMultipart("alternative")
+            msg = MIMEMultipart("mixed")
             msg["Subject"] = subject
             msg["From"] = f"{settings.EMAIL_FROM_NAME} <{settings.EMAIL_USERNAME}>"
             msg["To"] = to_email
-            msg.attach(MIMEText(html_body, "html"))
+
+            body = MIMEMultipart("alternative")
+            body.attach(MIMEText(html_body, "html"))
+            msg.attach(body)
+
+            for filename, content in attachments or []:
+                part = MIMEApplication(content)
+                part.add_header("Content-Disposition", "attachment", filename=filename)
+                msg.attach(part)
 
             await aiosmtplib.send(
                 msg,
@@ -27,7 +36,7 @@ class EmailService:
                 password=settings.EMAIL_PASSWORD,
                 start_tls=True,
             )
-            logger.info("email_sent", to=to_email, subject=subject)
+            logger.info("email_sent", to=to_email, subject=subject, attachments=len(attachments or []))
             return True
         except Exception as e:
             logger.error("email_send_failed", to=to_email, error=str(e))
@@ -39,9 +48,7 @@ class EmailService:
         <html><body>
         <h2>Welcome to AI Job Agent, {first_name}!</h2>
         <p>Please verify your email address to get started.</p>
-        <a href="{verify_url}" style="background:#4F46E5;color:white;padding:12px 24px;text-decoration:none;border-radius:6px;">
-            Verify Email
-        </a>
+        <a href="{verify_url}" style="background:#4F46E5;color:white;padding:12px 24px;text-decoration:none;border-radius:6px;">Verify Email</a>
         <p>Or copy this link: {verify_url}</p>
         <p>This link expires in 24 hours.</p>
         </body></html>
@@ -54,9 +61,7 @@ class EmailService:
         <html><body>
         <h2>Password Reset Request</h2>
         <p>Hi {first_name}, we received a request to reset your password.</p>
-        <a href="{reset_url}" style="background:#DC2626;color:white;padding:12px 24px;text-decoration:none;border-radius:6px;">
-            Reset Password
-        </a>
+        <a href="{reset_url}" style="background:#DC2626;color:white;padding:12px 24px;text-decoration:none;border-radius:6px;">Reset Password</a>
         <p>Or copy this link: {reset_url}</p>
         <p>This link expires in 1 hour. If you didn't request this, ignore this email.</p>
         </body></html>
@@ -68,7 +73,6 @@ class EmailService:
         <html><body>
         <h2>Application Submitted!</h2>
         <p>Hi {first_name}, your application for <strong>{role}</strong> at <strong>{company}</strong> has been tracked.</p>
-        <p>Your AI Job Agent is monitoring the status for you.</p>
         </body></html>
         """
         return await self._send(email, f"Application tracked: {role} at {company}", html)
@@ -78,7 +82,32 @@ class EmailService:
         <html><body>
         <h2>New Job Matches Found!</h2>
         <p>Hi {first_name}, your AI Job Agent found <strong>{job_count} new job matches</strong> for you.</p>
-        <p>Log in to view your personalized job recommendations with AI scores.</p>
         </body></html>
         """
         return await self._send(email, f"🎯 {job_count} new job matches found", html)
+
+    async def send_application_email(
+        self,
+        to_email: str,
+        candidate_name: str,
+        role: str,
+        company: str,
+        cover_letter_text: str,
+        resume_bytes: bytes,
+        resume_filename: str,
+    ) -> bool:
+        """The only genuine 'apply' action the pipeline performs — emails
+        the tailored resume + cover letter to a real recruiter address found
+        on the posting. There is no safe, generic way to auto-fill arbitrary
+        third-party application portals."""
+        safe_letter = (cover_letter_text or "").replace("\n", "<br>")
+        html = f"""
+        <html><body style="font-family:Georgia,serif;line-height:1.6;color:#222;">
+        <p>{safe_letter}</p>
+        <p>— {candidate_name}</p>
+        </body></html>
+        """
+        return await self._send(
+            to_email, f"Application for {role} — {candidate_name}", html,
+            attachments=[(resume_filename, resume_bytes)],
+        )
