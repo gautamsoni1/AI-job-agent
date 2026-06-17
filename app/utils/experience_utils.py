@@ -25,23 +25,31 @@ def extract_job_min_years(job_text: str) -> Optional[float]:
 
 
 def infer_job_level(job: dict) -> str:
-    """Returns entry/junior/mid/senior/lead/unknown for a job posting."""
     exp_field = job.get("experience_required") or ""
     title = job.get("title") or ""
     description = (job.get("description") or "")[:1500]
     combined = f"{exp_field} {title} {description}".lower()
-
+    title_lower = title.lower()
+ 
+    # Title-based "intern" check runs BEFORE numeric year extraction.
+    # Internship job descriptions often mention unrelated numbers (team's
+    # combined experience, stipend amounts, "1 year of internship before
+    # conversion", etc.) that would otherwise get picked up by
+    # extract_job_min_years() and misclassify a clearly-entry-level
+    # internship posting as mid/senior. The title saying "Intern" is a
+    # much stronger and more reliable signal than any number floating in
+    # the description.
+    if "intern" in title_lower:
+        return "entry"
+ 
     min_years = extract_job_min_years(combined)
     if min_years is not None:
         return experience_level_for(min_years)
-
+ 
     if any(w in combined for w in (
         "fresher", "entry level", "entry-level", "no prior experience",
         "no experience required", "graduate trainee", "campus hire",
     )):
-        return "entry"
-    title_lower = title.lower()
-    if "intern" in title_lower:
         return "entry"
     if any(w in title_lower for w in SENIORITY_WORDS):
         return "senior"

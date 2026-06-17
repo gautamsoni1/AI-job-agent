@@ -82,14 +82,28 @@ class ApifyService:
             return []
 
     def _linkedin_input(self, keywords: list[str], locations: list[str], _: str, limit: int) -> dict:
+        """
+        curious_coder/linkedin-jobs-scraper accepts a search-URL based input
+        as its primary mode, but we also send the common keyword/location
+        field names some versions of this actor (and forks) accept, since
+        extra unrecognized fields are harmless — the actor just ignores
+        whatever it doesn't use. This avoids a silent 0-results run if the
+        exact field name differs from what's documented.
+        """
         query = " ".join(keywords)
         location = locations[0] if locations else "India"
+        search_url = self._linkedin_search_url(query, location)
         return {
-            "urls": [self._linkedin_search_url(query, location)],
+            # Primary documented input for curious_coder/linkedin-jobs-scraper
+            "urls": [search_url],
+            "scrapeCompany": False,
+            "count": max(10, limit),
+            # Common alternate field names across LinkedIn-actor forks —
+            # harmless if unused by this specific actor version
+            "title": query,
+            "location": location,
             "searchKeywords": query,
             "keywords": query,
-            "location": location,
-            "count": max(10, limit),
             "maxItems": limit,
             "maxJobs": limit,
             "proxy": {"useApifyProxy": True},
@@ -176,19 +190,26 @@ class ApifyService:
         )
 
     def _normalize_linkedin(self, raw: dict) -> dict:
+        """
+        curious_coder/linkedin-jobs-scraper (and its forks) have been
+        observed to use slightly different field names across versions.
+        We try every commonly-seen variant here so a schema drift doesn't
+        silently zero out results — _first() just walks the list and
+        returns the first non-empty match.
+        """
         return self._job(
             raw,
             source="LinkedIn",
-            title=self._first(raw, "title", "jobTitle"),
-            company=self._first(raw, "companyName", "company", "companyTitle"),
-            location=self._first(raw, "location", "jobLocation"),
-            description=self._first(raw, "description", "jobDescription"),
-            apply_link=self._first(raw, "applyUrl", "jobUrl", "url", "link"),
-            salary_range=self._first(raw, "salary", "salaryRange"),
-            experience_required=self._first(raw, "experienceLevel", "experience"),
-            employment_type=self._first(raw, "employmentType", "jobType"),
-            posted_at=self._first(raw, "postedAt", "listedAt", "postedDate"),
-            company_logo=self._first(raw, "companyLogo", "logo"),
+            title=self._first(raw, "title", "jobTitle", "position", "positionName", "job_title"),
+            company=self._first(raw, "companyName", "company", "companyTitle", "company_name", "organization"),
+            location=self._first(raw, "location", "jobLocation", "place", "job_location"),
+            description=self._first(raw, "description", "jobDescription", "descriptionText", "job_description"),
+            apply_link=self._first(raw, "applyUrl", "jobUrl", "url", "link", "job_url", "jobPostingUrl"),
+            salary_range=self._first(raw, "salary", "salaryRange", "salaryInfo", "compensation"),
+            experience_required=self._first(raw, "experienceLevel", "experience", "seniorityLevel", "seniority_level"),
+            employment_type=self._first(raw, "employmentType", "jobType", "contractType", "employment_type"),
+            posted_at=self._first(raw, "postedAt", "listedAt", "postedDate", "postedTime", "posted_time", "publishedAt"),
+            company_logo=self._first(raw, "companyLogo", "logo", "company_logo_url"),
         )
 
     def _normalize_indeed(self, raw: dict) -> dict:
