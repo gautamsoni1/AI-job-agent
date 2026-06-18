@@ -8,6 +8,7 @@ class JobDiscoverRequest(BaseModel):
     locations: list[str]
     experience_level: str = "mid"
     max_results: int = 50
+    max_age_days: int = 30  
 
 
 class JobDescribeRequest(BaseModel):

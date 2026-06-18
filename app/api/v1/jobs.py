@@ -16,6 +16,7 @@ from app.schemas.job import JobDiscoverRequest, JobDescribeRequest, JobResponse,
 from app.services.apify_service import ApifyService
 from app.services.google_sheets_service import GoogleSheetsService
 from app.ai.orchestrator import AIOrchestrator
+from app.utils.date_utils import is_recently_posted, parse_flexible_date
 
 router = APIRouter()
 settings = get_settings()
@@ -36,9 +37,9 @@ async def discover_jobs(
         body.locations,
         body.experience_level,
         body.max_results,
+        body.max_age_days,
     )
     return {"success": True, "message": f"Job discovery started. Searching for {', '.join(body.keywords)} in {', '.join(body.locations)}."}
-
 
 @router.get("/", response_model=JobListResponse)
 async def list_jobs(
@@ -298,14 +299,20 @@ async def _sync_to_sheets(job: dict, match_score: float = 0.0, ats_score: float 
         structlog.get_logger().warning("sheets_sync_failed", error=str(e))
 
 
-async def _run_job_discovery(db, user_id: str, keywords: list, locations: list, experience_level: str, max_results: int):
+async def _run_job_discovery(db, user_id: str, keywords: list, locations: list, experience_level: str, max_results: int, max_age_days: int = 30):
     try:
         apify = ApifyService()
         raw_jobs = await apify.fetch_jobs(keywords, locations, experience_level, max_results)
         repo = JobRepository(db)
         orchestrator = AIOrchestrator(db)
 
+        skipped_old = 0
         for raw_job in raw_jobs:
+            posted_value = raw_job.get("posted_at") or raw_job.get("posted_date")
+            if not is_recently_posted(posted_value, max_age_days=max_age_days):
+                skipped_old += 1
+                continue
+
             raw_job["user_id"] = user_id
             raw_job["created_at"] = datetime.now(timezone.utc)
             raw_job["discovered_at"] = raw_job["created_at"]
@@ -318,7 +325,7 @@ async def _run_job_discovery(db, user_id: str, keywords: list, locations: list, 
             raw_job.setdefault("work_type", "Work type not provided")
             raw_job.setdefault("bond", "Bond not provided")
             raw_job.setdefault("package", "Package not provided")
-            raw_job.setdefault("posted_date", _parse_job_datetime(raw_job.get("posted_at")))
+            raw_job.setdefault("posted_date", parse_flexible_date(posted_value))
 
             existing = await repo.check_duplicate(user_id, raw_job.get("apply_link", ""))
             if existing:
@@ -328,7 +335,6 @@ async def _run_job_discovery(db, user_id: str, keywords: list, locations: list, 
             if job_ids:
                 job_with_id = dict(raw_job)
                 job_with_id["_id"] = job_ids[0]
-                # Scout in background
                 relevance_score = 0.0
                 try:
                     result = await orchestrator.execute(
@@ -342,16 +348,19 @@ async def _run_job_discovery(db, user_id: str, keywords: list, locations: list, 
                 except Exception:
                     pass
 
-                # Sync every newly discovered job to Google Sheets immediately,
-                # as required by spec. Best-effort — never blocks discovery.
                 await _sync_to_sheets(job_with_id, match_score=relevance_score, ats_score=0.0)
 
         await db["ai_timeline"].insert_one({
             "user_id": user_id,
             "event_type": "JOB_DISCOVERED",
-            "title": f"Discovered {len(raw_jobs)} jobs",
+            "title": f"Discovered {len(raw_jobs) - skipped_old} jobs",
             "description": f"Keywords: {', '.join(keywords)}",
-            "metadata": {"count": len(raw_jobs), "keywords": keywords, "locations": locations},
+            "metadata": {
+                "count": len(raw_jobs) - skipped_old,
+                "skipped_old": skipped_old,
+                "keywords": keywords,
+                "locations": locations,
+            },
             "created_at": datetime.utcnow(),
         })
     except Exception as e:
