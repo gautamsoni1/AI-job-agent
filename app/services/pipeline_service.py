@@ -50,7 +50,7 @@ from app.utils.experience_utils import (
     experience_level_for,
     is_job_suitable_for_candidate,
 )
-from app.utils.date_utils import is_recently_posted
+from app.utils.date_utils import is_recently_posted, week_bucket
 
 logger = structlog.get_logger()
 settings = get_settings()
@@ -286,7 +286,7 @@ class PipelineService:
             # WITH this call:
             await self._sync_to_sheets_safe(job_with_id, match_score=overall_match, ats_score=ats_data.get("ats_score", 0))
 
-        saved_jobs.sort(key=lambda j: j.get("match_score", 0), reverse=True)
+        saved_jobs.sort(key=lambda j: (week_bucket(j.get("posted_at") or j.get("posted_date")), -j.get("match_score", 0)))
 
         # 6. Persist pipeline run + export "before apply" sheet
         pipeline_doc = {

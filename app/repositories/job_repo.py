@@ -14,25 +14,94 @@ class JobRepository(BaseRepository):
         super().__init__(db, "jobs")
 
     async def find_by_user(self, user_id: str, skip: int = 0, limit: int = 50) -> list[dict]:
-        cursor = self.collection.find(
-            {"user_id": user_id, "is_deleted": {"$ne": True}},
-            sort=[("ai_score", -1), ("created_at", -1)]
-        ).skip(skip).limit(limit)
-        return await cursor.to_list(length=limit)
+        pipeline = [
+            {"$match": {"user_id": user_id, "is_deleted": {"$ne": True}}},
+            {"$addFields": {
+                "_days_old": {
+                    "$cond": [
+                        {"$ifNull": ["$posted_date", False]},
+                        {"$divide": [{"$subtract": ["$$NOW", "$posted_date"]}, 1000 * 60 * 60 * 24]},
+                        9999,
+                    ]
+                }
+            }},
+            {"$addFields": {
+                "_recency_bucket": {
+                    "$switch": {
+                        "branches": [
+                            {"case": {"$lte": ["$_days_old", 7]}, "then": 1},
+                            {"case": {"$lte": ["$_days_old", 14]}, "then": 2},
+                            {"case": {"$lte": ["$_days_old", 21]}, "then": 3},
+                            {"case": {"$lte": ["$_days_old", 28]}, "then": 4},
+                        ],
+                        "default": 5,
+                    }
+                }
+            }},
+            {"$sort": {"_recency_bucket": 1, "ai_score": -1, "created_at": -1}},
+            {"$skip": skip},
+            {"$limit": limit},
+        ]
+        return await self.collection.aggregate(pipeline).to_list(length=limit)
 
     async def find_saved_by_user(self, user_id: str) -> list[dict]:
-        cursor = self.collection.find(
-            {"user_id": user_id, "is_saved": True, "is_deleted": {"$ne": True}},
-            sort=[("saved_at", -1)]
-        )
-        return await cursor.to_list(length=100)
+        pipeline = [
+            {"$match": {"user_id": user_id, "is_saved": True, "is_deleted": {"$ne": True}}},
+            {"$addFields": {
+                "_days_old": {
+                    "$cond": [
+                        {"$ifNull": ["$posted_date", False]},
+                        {"$divide": [{"$subtract": ["$$NOW", "$posted_date"]}, 1000 * 60 * 60 * 24]},
+                        9999,
+                    ]
+                }
+            }},
+            {"$addFields": {
+                "_recency_bucket": {
+                    "$switch": {
+                        "branches": [
+                            {"case": {"$lte": ["$_days_old", 7]}, "then": 1},
+                            {"case": {"$lte": ["$_days_old", 14]}, "then": 2},
+                            {"case": {"$lte": ["$_days_old", 21]}, "then": 3},
+                            {"case": {"$lte": ["$_days_old", 28]}, "then": 4},
+                        ],
+                        "default": 5,
+                    }
+                }
+            }},
+            {"$sort": {"_recency_bucket": 1, "saved_at": -1}},
+        ]
+        return await self.collection.aggregate(pipeline).to_list(length=100)
 
     async def find_top_matches(self, user_id: str, limit: int = 10) -> list[dict]:
-        cursor = self.collection.find(
-            {"user_id": user_id, "match_score": {"$exists": True}, "is_deleted": {"$ne": True}},
-            sort=[("match_score", -1)]
-        ).limit(limit)
-        return await cursor.to_list(length=limit)
+        pipeline = [
+            {"$match": {"user_id": user_id, "match_score": {"$exists": True}, "is_deleted": {"$ne": True}}},
+            {"$addFields": {
+                "_days_old": {
+                    "$cond": [
+                        {"$ifNull": ["$posted_date", False]},
+                        {"$divide": [{"$subtract": ["$$NOW", "$posted_date"]}, 1000 * 60 * 60 * 24]},
+                        9999,
+                    ]
+                }
+            }},
+            {"$addFields": {
+                "_recency_bucket": {
+                    "$switch": {
+                        "branches": [
+                            {"case": {"$lte": ["$_days_old", 7]}, "then": 1},
+                            {"case": {"$lte": ["$_days_old", 14]}, "then": 2},
+                            {"case": {"$lte": ["$_days_old", 21]}, "then": 3},
+                            {"case": {"$lte": ["$_days_old", 28]}, "then": 4},
+                        ],
+                        "default": 5,
+                    }
+                }
+            }},
+            {"$sort": {"_recency_bucket": 1, "match_score": -1}},
+            {"$limit": limit},
+        ]
+        return await self.collection.aggregate(pipeline).to_list(length=limit)
 
     async def check_duplicate(self, user_id: str, apply_link: str) -> Optional[dict]:
         return await self.collection.find_one(

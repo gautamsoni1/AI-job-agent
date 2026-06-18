@@ -54,6 +54,34 @@ def parse_flexible_date(value) -> Optional[datetime]:
     return dt
 
 
+def week_bucket(posted_value, reference: Optional[datetime] = None) -> int:
+    """1 = posted in last 7 days, 2 = 8-14 days, 3 = 15-21, 4 = 22-28, 5 = older/unknown."""
+    dt = parse_flexible_date(posted_value)
+    if dt is None:
+        return 5
+    reference = reference or datetime.utcnow()
+    days = (reference - dt).days
+    if days <= 7:
+        return 1
+    if days <= 14:
+        return 2
+    if days <= 21:
+        return 3
+    if days <= 28:
+        return 4
+    return 5
+
+
+def recency_label(posted_value) -> str:
+    labels = {
+        1: "Posted this week",
+        2: "Posted 2 weeks ago",
+        3: "Posted 3 weeks ago",
+        4: "Posted 4 weeks ago",
+        5: "Posted over a month ago / date unknown",
+    }
+    return labels[week_bucket(posted_value)]
+
 def is_recently_posted(posted_value, max_age_days: int = 30) -> bool:
     """True if posting is within max_age_days. If date can't be determined
     at all, default to keep — better than silently dropping a genuinely

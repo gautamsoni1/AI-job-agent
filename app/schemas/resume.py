@@ -2,7 +2,6 @@ from pydantic import BaseModel
 from datetime import datetime
 from typing import Optional
 
-
 class ResumeUploadResponse(BaseModel):
     id: str
     filename: str
@@ -13,6 +12,10 @@ class ResumeUploadResponse(BaseModel):
     latest_title: Optional[str]
     version_number: int
     created_at: datetime
+    ats_score: float = 0.0
+    ats_report_id: Optional[str] = None
+    missing_keywords: list[str] = []
+    formatting_issues: list[str] = []    
 
 
 class ResumeListItem(BaseModel):

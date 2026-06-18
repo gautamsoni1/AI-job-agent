@@ -76,7 +76,11 @@ class GroqClient:
     """
 
     def __init__(self):
-        self.max_retries = settings.GROQ_MAX_RETRIES
+        self._max_retries = {
+            "groq": settings.GROQ_MAX_RETRIES,
+            "mistral": settings.MISTRAL_MAX_RETRIES,
+            "gemini": settings.GEMINI_MAX_RETRIES,
+        }
 
         # --- Per-provider key rotators ---
         self._rotators = {
@@ -181,15 +185,16 @@ class GroqClient:
 
         primary_model, fallback_model = self._models[provider]
         models_to_try = [m for m in (primary_model, fallback_model) if m]
+        max_retries = self._max_retries.get(provider, 3)
 
         last_error: Optional[Exception] = None
         # Try each key this provider has, round-robin order. For each
         # key, try primary model then fallback model, with retry/backoff.
         num_keys = len(rotator.keys)
-        for _ in range(num_keys):
+        for key_index in range(num_keys):
             api_key = await rotator.next_key()
             for model in models_to_try:
-                for attempt in range(self.max_retries):
+                for attempt in range(max_retries):
                     try:
                         return await self._call_provider(
                             provider, api_key, model, system_prompt, user_prompt,
@@ -197,21 +202,31 @@ class GroqClient:
                         )
                     except Exception as e:
                         last_error = e
-                        wait_time = 2 ** attempt
+                        rate_limited = self._is_rate_limit_error(e)
                         logger.warning(
                             "llm_call_failed",
                             provider=provider,
                             model=model,
+                            key_index=key_index + 1,
                             attempt=attempt + 1,
                             error=str(e),
-                            retry_in=wait_time,
+                            rate_limited=rate_limited,
                         )
-                        if attempt < self.max_retries - 1:
-                            await asyncio.sleep(wait_time)
+                        # Rate-limit / quota errors won't resolve in a few
+                        # seconds (the provider itself usually says "try
+                        # again in Xm") — don't waste time retrying the SAME
+                        # key, move on to the next key/model immediately.
+                        if rate_limited:
+                            break
+                        if attempt < max_retries - 1:
+                            await asyncio.sleep(2 ** attempt)
 
         # Every key (and every model) for this provider failed.
         raise RuntimeError(f"Provider '{provider}' failed on all {num_keys} key(s): {last_error}")
 
+    def _is_rate_limit_error(self, e: Exception) -> bool:
+        text = str(e).lower()
+        return "429" in text or "rate_limit" in text or "rate limit" in text
     async def _call_provider(
         self,
         provider: str,

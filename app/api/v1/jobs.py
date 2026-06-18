@@ -16,7 +16,7 @@ from app.schemas.job import JobDiscoverRequest, JobDescribeRequest, JobResponse,
 from app.services.apify_service import ApifyService
 from app.services.google_sheets_service import GoogleSheetsService
 from app.ai.orchestrator import AIOrchestrator
-from app.utils.date_utils import is_recently_posted, parse_flexible_date
+from app.utils.date_utils import is_recently_posted, parse_flexible_date, recency_label
 
 router = APIRouter()
 settings = get_settings()
@@ -228,6 +228,7 @@ def _to_job_response(j: dict) -> dict:
     j["package"] = _display_value(j.get("package"), "Package not provided")
     j["company_logo"] = _display_value(j.get("company_logo"), "Company logo not provided")
     j.setdefault("required_skills", [])
+    j["recency_label"] = recency_label(j.get("posted_date") or j.get("posted_at"))
     j["salary_min"] = _display_value(j.get("salary_min"), "Salary min not provided")
     j["salary_max"] = _display_value(j.get("salary_max"), "Salary max not provided")
     j.setdefault("scout_report", {})

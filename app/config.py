@@ -70,8 +70,10 @@ class Settings(BaseSettings):
     MISTRAL_API_KEY_3: str = ""
     MISTRAL_API_KEY_4: str = ""
     MISTRAL_API_KEY_5: str = ""
-    MISTRAL_PRIMARY_MODEL: str = "open-mistral-7b"
-    MISTRAL_FALLBACK_MODEL: str = "mistral-small-latest"
+    # --- Mistral (2nd fallback provider)
+    MISTRAL_PRIMARY_MODEL: str = "mistral-small-latest"   # rolling alias, auto-updates
+    MISTRAL_FALLBACK_MODEL: str = "mistral-medium-latest"  # rolling alias, auto-updates
+     # confirmed active till Oct 16, 2026
     MISTRAL_MAX_RETRIES: int = 3
 
     # --- Gemini (3rd / last fallback provider). Free-tier friendly. ---
@@ -80,8 +82,9 @@ class Settings(BaseSettings):
     GEMINI_API_KEY_3: str = ""
     GEMINI_API_KEY_4: str = ""
     GEMINI_API_KEY_5: str = ""
-    GEMINI_PRIMARY_MODEL: str = "gemini-1.5-flash"
-    GEMINI_FALLBACK_MODEL: str = "gemini-1.5-flash-8b"
+   
+    GEMINI_PRIMARY_MODEL: str = "gemini-flash-latest"       # official rolling alias
+    GEMINI_FALLBACK_MODEL: str = "gemini-2.5-flash-lite"     # confirmed active till Oct 16, 2026
     GEMINI_MAX_RETRIES: int = 3
 
     # Overall LLM behavior

@@ -1,6 +1,9 @@
 """
 Resume API Endpoints — Upload, Parse, Analyze, Optimize, Download
 """
+from mistralai_azure import Optional
+
+from app.repositories.ats_repo import ATSRepository
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, UploadFile, File, BackgroundTasks
 from fastapi.responses import FileResponse
@@ -94,10 +97,45 @@ async def upload_resume(
     })
 
     # Update user skills
+    # Update user skills
     if parsed.get("skills_found"):
         await db["users"].update_one(
             {"_id": current_user["_id"]},
             {"$addToSet": {"skills": {"$each": parsed["skills_found"]}}}
+        )
+
+    # NEW: immediate baseline ATS score so the user sees it right after upload
+    generic_jd = _build_generic_job_description(parsed, (current_user.get("preferred_roles") or [None])[0])
+    orchestrator = AIOrchestrator(db)
+    ats_result = await orchestrator.execute(
+        agent_name="ats_agent",
+        task="score",
+        user_id=str(current_user["_id"]),
+        payload={"resume_text": parsed.get("raw_text", ""), "job_description": generic_jd},
+    )
+    ats_data = ats_result.data if ats_result.success else {}
+    ats_report_id = None
+    if ats_result.success:
+        ats_repo = ATSRepository(db)
+        ats_report_id = await ats_repo.insert({
+            "user_id": str(current_user["_id"]),
+            "resume_id": resume_id,
+            "job_description_snippet": generic_jd[:200],
+            "ats_score": ats_data.get("ats_score", 0.0),
+            "keyword_coverage": ats_data.get("keyword_coverage", {}),
+            "missing_keywords": ats_data.get("missing_keywords", []),
+            "section_analysis": ats_data.get("section_analysis", {}),
+            "formatting_issues": ats_data.get("formatting_issues", []),
+            "skill_relevance": ats_data.get("skill_relevance", 0.0),
+            "industry_alignment": ats_data.get("industry_alignment", 0.0),
+            "improvement_plan": ats_data.get("improvement_plan", []),
+            "predicted_pass_rate": ats_data.get("predicted_pass_rate", 0.0),
+            "full_report": ats_data,
+            "created_at": datetime.now(timezone.utc),
+        })
+        await db["users"].update_one(
+            {"_id": current_user["_id"]},
+            {"$set": {"latest_ats_score": ats_data.get("ats_score", 0.0)}}
         )
 
     # Log timeline event in background
@@ -120,6 +158,10 @@ async def upload_resume(
         latest_title=None,
         version_number=version_number,
         created_at=datetime.now(timezone.utc),
+        ats_score=ats_data.get("ats_score", 0.0),
+        ats_report_id=ats_report_id,
+        missing_keywords=ats_data.get("missing_keywords", []),
+        formatting_issues=ats_data.get("formatting_issues", []),
     )
 
 
@@ -646,6 +688,16 @@ def _quality_audit_passed(ai_data: dict) -> bool:
         estimated_score = 0.0
     return flags_ok and estimated_score >= 80
 
+
+def _build_generic_job_description(parsed: dict, target_role_hint: Optional[str]) -> str:
+    skills = parsed.get("skills_found", []) or []
+    role = target_role_hint or (f"{skills[0]} Professional" if skills else "General Professional Role")
+    skills_phrase = ", ".join(skills[:10]) or "the candidate's core domain"
+    return (
+        f"A {role} role at a competitive technology company. "
+        f"Looking for strong skills in {skills_phrase} with relevant hands-on experience. "
+        "Evaluate against general industry best practices for this role."
+    )
 
 async def _score_optimized_resume(
     orchestrator: AIOrchestrator,
