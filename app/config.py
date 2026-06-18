@@ -34,16 +34,58 @@ class Settings(BaseSettings):
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
 
     # ==========================================
-    # AI - GROQ ONLY (free tier, no credit card required)
+    # AI — MULTI-PROVIDER, MULTI-KEY, OPEN-SOURCE MODELS ONLY
+    # ------------------------------------------
+    # Provider chain (in order): GROQ -> MISTRAL -> GEMINI
+    # Each provider has up to 5 API keys that are round-robined per
+    # request (request 1 -> key 1, request 2 -> key 2, ... request 6 ->
+    # key 1 again). This spreads load across keys so per-key free-tier
+    # quotas last longer.
+    #
+    # If a call fails/rate-limits on EVERY key of the current provider,
+    # the whole provider is considered exhausted for that call and the
+    # client automatically falls through to the next provider in the
+    # chain. Only the keys you actually fill in .env are used — empty
+    # slots are skipped automatically, so you don't need all 5 for every
+    # provider to get started.
     # ==========================================
+
+    # --- Groq (primary). Open-source Llama/Mixtral family models. ---
+    GROQ_API_KEY_1: str = ""
+    GROQ_API_KEY_2: str = ""
+    GROQ_API_KEY_3: str = ""
+    GROQ_API_KEY_4: str = ""
+    GROQ_API_KEY_5: str = ""
     # NOTE: mistral-saba-24b was deprecated by Groq on 07/30/2025 and
-    # mixtral-8x7b-32768 on 03/20/2025 - both return errors now. Your .env
-    # uses llama-3.3-70b-versatile as primary and llama-3.1-8b-instant as
-    # fallback, both currently live, stable Groq models - kept as-is here.
-    GROQ_API_KEY: str = ""
+    # mixtral-8x7b-32768 on 03/20/2025 - both return errors now. Using
+    # currently-live, stable, open-source Groq models instead.
     GROQ_PRIMARY_MODEL: str = "llama-3.3-70b-versatile"
     GROQ_FALLBACK_MODEL: str = "llama-3.1-8b-instant"
     GROQ_MAX_RETRIES: int = 3
+
+    # --- Mistral (2nd fallback provider). Official api.mistral.ai. ---
+    # Open-weight Mistral models (e.g. open-mistral-7b / mistral-small).
+    MISTRAL_API_KEY_1: str = ""
+    MISTRAL_API_KEY_2: str = ""
+    MISTRAL_API_KEY_3: str = ""
+    MISTRAL_API_KEY_4: str = ""
+    MISTRAL_API_KEY_5: str = ""
+    MISTRAL_PRIMARY_MODEL: str = "open-mistral-7b"
+    MISTRAL_FALLBACK_MODEL: str = "mistral-small-latest"
+    MISTRAL_MAX_RETRIES: int = 3
+
+    # --- Gemini (3rd / last fallback provider). Free-tier friendly. ---
+    GEMINI_API_KEY_1: str = ""
+    GEMINI_API_KEY_2: str = ""
+    GEMINI_API_KEY_3: str = ""
+    GEMINI_API_KEY_4: str = ""
+    GEMINI_API_KEY_5: str = ""
+    GEMINI_PRIMARY_MODEL: str = "gemini-1.5-flash"
+    GEMINI_FALLBACK_MODEL: str = "gemini-1.5-flash-8b"
+    GEMINI_MAX_RETRIES: int = 3
+
+    # Overall LLM behavior
+    LLM_PROVIDER_ORDER: str = "groq,mistral,gemini"  # comma-separated, order = fallback order
 
     # ==========================================
     # CHROMADB (OPEN SOURCE)
@@ -151,6 +193,32 @@ class Settings(BaseSettings):
     def allowed_resume_types_list(self) -> list[str]:
         """ALLOWED_RESUME_TYPES as a clean list, e.g. ['pdf', 'docx']."""
         return [t.strip().lower() for t in self.ALLOWED_RESUME_TYPES.split(",") if t.strip()]
+
+    @property
+    def groq_api_keys(self) -> list[str]:
+        """All non-empty Groq keys, in order — used for round-robin rotation."""
+        keys = [self.GROQ_API_KEY_1, self.GROQ_API_KEY_2, self.GROQ_API_KEY_3,
+                self.GROQ_API_KEY_4, self.GROQ_API_KEY_5]
+        return [k.strip() for k in keys if k and k.strip()]
+
+    @property
+    def mistral_api_keys(self) -> list[str]:
+        """All non-empty Mistral keys, in order — used for round-robin rotation."""
+        keys = [self.MISTRAL_API_KEY_1, self.MISTRAL_API_KEY_2, self.MISTRAL_API_KEY_3,
+                self.MISTRAL_API_KEY_4, self.MISTRAL_API_KEY_5]
+        return [k.strip() for k in keys if k and k.strip()]
+
+    @property
+    def gemini_api_keys(self) -> list[str]:
+        """All non-empty Gemini keys, in order — used for round-robin rotation."""
+        keys = [self.GEMINI_API_KEY_1, self.GEMINI_API_KEY_2, self.GEMINI_API_KEY_3,
+                self.GEMINI_API_KEY_4, self.GEMINI_API_KEY_5]
+        return [k.strip() for k in keys if k and k.strip()]
+
+    @property
+    def llm_provider_order_list(self) -> list[str]:
+        """Provider fallback order as a list, e.g. ['groq', 'mistral', 'gemini']."""
+        return [p.strip().lower() for p in self.LLM_PROVIDER_ORDER.split(",") if p.strip()]
 
 
 @lru_cache()
