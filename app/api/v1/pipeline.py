@@ -4,7 +4,6 @@ improve → job discovery/scouting/matching → sheets → apply-all / apply-one
 """
 import os
 from typing import Optional
-from chromadb import db
 from fastapi import APIRouter, Depends, UploadFile, File, Form
 from fastapi.responses import FileResponse
 from motor.motor_asyncio import AsyncIOMotorDatabase
@@ -37,7 +36,7 @@ async def run_pipeline(
     location_list = [loc.strip() for loc in locations.split(",") if loc.strip()] if locations else None
 
     service = PipelineService(db)
-    return await service.run_pipeline(
+    result = await service.run_pipeline(
         user=current_user,
         file_bytes=file_bytes,
         filename=file.filename or "resume",
@@ -46,6 +45,7 @@ async def run_pipeline(
         locations=location_list,
         max_jobs=max(1, min(max_jobs, 40)),
     )
+    return result
 
 
 @router.get("/history")
@@ -77,7 +77,7 @@ async def apply_all(pipeline_id: str, current_user: dict = Depends(get_verified_
         pipeline_id=pipeline_id,
         total_jobs=result["total"],
         applied_count=result["applied_count"],
-        manual_apply_count=result["manual_count"],   # ← yeh line missing thi
+        manual_apply_count=result["manual_count"],
         failed_count=result["failed_count"],
         after_apply_sheet_url=f"/api/v1/pipeline/{pipeline_id}/download/after-apply",
         results=result["results"],

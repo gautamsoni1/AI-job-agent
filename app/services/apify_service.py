@@ -30,28 +30,28 @@ class ApifyService:
     ) -> list[dict]:
         """Fetch jobs from LinkedIn, Indeed, Naukri, and Glassdoor."""
         sources = [
-            ("LinkedIn", settings.APIFY_LINKEDIN_ACTOR, self._linkedin_input, self._normalize_linkedin),
-            ("Indeed", settings.APIFY_INDEED_ACTOR, self._indeed_input, self._normalize_indeed),
-            ("Naukri", settings.APIFY_NAUKRI_ACTOR, self._naukri_input, self._normalize_naukri),
+            ("LinkedIn",  settings.APIFY_LINKEDIN_ACTOR,  self._linkedin_input,  self._normalize_linkedin),
+            ("Indeed",    settings.APIFY_INDEED_ACTOR,    self._indeed_input,    self._normalize_indeed),
+            ("Naukri",    settings.APIFY_NAUKRI_ACTOR,    self._naukri_input,    self._normalize_naukri),
             ("Glassdoor", settings.APIFY_GLASSDOOR_ACTOR, self._glassdoor_input, self._normalize_glassdoor),
         ]
-        configured_sources = [source for source in sources if source[1]]
+        configured_sources = [s for s in sources if s[1]]
         if not configured_sources:
             logger.warning("apify_no_actors_configured")
             return []
 
-        limit = max(1, math.ceil(max_results / len(configured_sources)))
+        limit = max(10, math.ceil(max_results / len(configured_sources)))
         tasks = [
-            self._fetch_source(name, actor_id, input_factory, normalizer, keywords, locations, experience_level, limit)
+            self._fetch_source(name, actor_id, input_factory, normalizer,
+                               keywords, locations, experience_level, limit)
             for name, actor_id, input_factory, normalizer in configured_sources
         ]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         jobs_by_source = []
         for source, result in zip(configured_sources, results):
-            source_name = source[0]
             if isinstance(result, Exception):
-                logger.error("apify_source_failed", source=source_name, error=str(result))
+                logger.error("apify_source_failed", source=source[0], error=str(result))
                 continue
             jobs_by_source.append(result)
 
@@ -74,80 +74,105 @@ class ApifyService:
             run_input = input_factory(keywords, locations, experience_level, limit)
             result = await self.run_actor(actor_id, run_input)
             jobs = [normalizer(job) for job in result if job]
-            jobs = [job for job in jobs if job.get("title") and (job.get("apply_link") or job.get("company"))]
-            logger.info("apify_source_jobs_fetched", source=source_name, actor=actor_id, count=len(jobs))
+            jobs = [j for j in jobs if j.get("title") and (j.get("apply_link") or j.get("company"))]
+            logger.info("apify_source_jobs_fetched",
+                        source=source_name, actor=actor_id, count=len(jobs))
             return jobs
         except Exception as e:
-            logger.error("apify_source_fetch_failed", source=source_name, actor=actor_id, error=str(e))
+            logger.error("apify_source_fetch_failed",
+                         source=source_name, actor=actor_id, error=str(e))
             return []
 
-    def _linkedin_input(self, keywords: list[str], locations: list[str], _: str, limit: int) -> dict:
+    # ------------------------------------------------------------------ #
+    #  INPUT BUILDERS
+    # ------------------------------------------------------------------ #
+
+    def _linkedin_input(self, keywords: list[str], locations: list[str],
+                        _: str, limit: int) -> dict:
         """
-        curious_coder/linkedin-jobs-scraper accepts a search-URL based input
-        as its primary mode, but we also send the common keyword/location
-        field names some versions of this actor (and forks) accept, since
-        extra unrecognized fields are harmless — the actor just ignores
-        whatever it doesn't use. This avoids a silent 0-results run if the
-        exact field name differs from what's documented.
+        curious_coder/linkedin-jobs-scraper — confirmed schema from test.py:
+          - urls: required (list of LinkedIn job-search URLs)
+          - count: required, must be >= 10
+          - scrapeCompany: optional bool
+          - proxy: optional
+
+        Extra fields (keyword, location, etc.) are harmless if the actor
+        ignores them; they help if a fork uses different field names.
         """
-        query = " ".join(keywords)
+        query    = " ".join(keywords)
         location = locations[0] if locations else "India"
         search_url = self._linkedin_search_url(query, location)
+        count = max(10, limit)          # actor validates count >= 10
         return {
-            # Primary documented input for curious_coder/linkedin-jobs-scraper
-            "urls": [search_url],
+            # --- confirmed required fields ---
+            "urls":          [search_url],
+            "count":         count,
             "scrapeCompany": False,
-            "count": max(10, limit),
-            # Common alternate field names across LinkedIn-actor forks —
-            # harmless if unused by this specific actor version
-            "title": query,
-            "location": location,
+            # --- common alternate field names across LinkedIn-actor forks ---
+            "title":          query,
+            "location":       location,
             "searchKeywords": query,
-            "keywords": query,
-            "maxItems": limit,
-            "maxJobs": limit,
-            "proxy": {"useApifyProxy": True},
+            "keywords":       query,
+            "maxItems":       count,
+            "maxJobs":        count,
+            "proxy":          {"useApifyProxy": True},
         }
 
-    def _indeed_input(self, keywords: list[str], locations: list[str], _: str, limit: int) -> dict:
+    def _indeed_input(self, keywords: list[str], locations: list[str],
+                      _: str, limit: int) -> dict:
         return {
-            "keyword": " ".join(keywords),
-            "query": " ".join(keywords),
+            "keyword":  " ".join(keywords),
+            "query":    " ".join(keywords),
             "location": locations[0] if locations else "India",
             "maxItems": limit,
-            "maxRows": limit,
-            "country": "in",
+            "maxRows":  limit,
+            "country":  "in",
         }
 
-    def _naukri_input(self, keywords: list[str], locations: list[str], experience_level: str, limit: int) -> dict:
+    def _naukri_input(self, keywords: list[str], locations: list[str],
+                      experience_level: str, limit: int) -> dict:
         return {
-            "keyword": " ".join(keywords),
+            "keyword":  " ".join(keywords),
             "keywords": " ".join(keywords),
             "location": locations[0] if locations else "India",
             "maxItems": limit,
-            "maxJobs": max(50, limit),
+            "maxJobs":  max(50, limit),
             "experience": self._naukri_experience(experience_level),
         }
 
-    def _glassdoor_input(self, keywords: list[str], locations: list[str], _: str, limit: int) -> dict:
+    def _glassdoor_input(self, keywords: list[str], locations: list[str],
+                         _: str, limit: int) -> dict:
+        """
+        valig/glassdoor-jobs-scraper — commonly accepted fields.
+        Multiple field-name variants are sent so the actor picks whichever
+        it recognises; extra keys are silently ignored by Apify actors.
+        """
+        query    = " ".join(keywords)
+        location = locations[0] if locations else "India"
+        count    = max(10, limit)
         return {
-            "keyword": " ".join(keywords),
-            "query": " ".join(keywords),
-            "location": locations[0] if locations else "India",
-            "maxItems": limit,
-            "maxRows": limit,
-            "count": limit,
-            "proxy": {"useApifyProxy": True},
+            # Primary fields
+            "keyword":      query,
+            "query":        query,
+            "searchQuery":  query,
+            "location":     location,
+            # Limit variants
+            "maxItems":     count,
+            "maxRows":      count,
+            "count":        count,
+            "limit":        count,
+            # Proxy (most Glassdoor actors need it to avoid blocks)
+            "proxy":        {"useApifyProxy": True},
         }
+
+    # ------------------------------------------------------------------ #
+    #  HELPERS
+    # ------------------------------------------------------------------ #
 
     def _naukri_experience(self, experience_level: str) -> str:
         mapping = {
-            "entry": "0",
-            "junior": "1",
-            "mid": "3",
-            "senior": "5",
-            "lead": "8",
-            "all": "all",
+            "entry": "0", "junior": "1", "mid": "3",
+            "senior": "5", "lead": "8", "all": "all",
         }
         value = str(experience_level or "all").strip().lower()
         if value in mapping:
@@ -158,7 +183,6 @@ class ApifyService:
 
     def _linkedin_search_url(self, query: str, location: str) -> str:
         from urllib.parse import urlencode
-
         params = urlencode({"keywords": query, "location": location})
         return f"https://www.linkedin.com/jobs/search/?{params}"
 
@@ -167,7 +191,9 @@ class ApifyService:
         if not actor_id:
             return []
         try:
-            run = await asyncio.to_thread(self.client.actor(actor_id).call, run_input=input_data)
+            run = await asyncio.to_thread(
+                self.client.actor(actor_id).call, run_input=input_data
+            )
             dataset_id = self._get_default_dataset_id(run)
             if not dataset_id:
                 logger.warning("apify_actor_no_dataset", actor=actor_id)
@@ -182,34 +208,44 @@ class ApifyService:
 
     def _get_default_dataset_id(self, run) -> str:
         if isinstance(run, dict):
-            return run.get("defaultDatasetId") or run.get("default_dataset_id") or ""
-        return (
-            getattr(run, "default_dataset_id", "")
-            or getattr(run, "defaultDatasetId", "")
-            or ""
-        )
+            return (run.get("defaultDatasetId")
+                    or run.get("default_dataset_id") or "")
+        return (getattr(run, "default_dataset_id", "")
+                or getattr(run, "defaultDatasetId", "") or "")
+
+    # ------------------------------------------------------------------ #
+    #  NORMALIZERS
+    # ------------------------------------------------------------------ #
 
     def _normalize_linkedin(self, raw: dict) -> dict:
         """
-        curious_coder/linkedin-jobs-scraper (and its forks) have been
-        observed to use slightly different field names across versions.
-        We try every commonly-seen variant here so a schema drift doesn't
-        silently zero out results — _first() just walks the list and
-        returns the first non-empty match.
+        Handles field-name drift across curious_coder actor versions and forks.
+        Every commonly-seen variant is tried; first non-empty wins.
         """
         return self._job(
             raw,
             source="LinkedIn",
-            title=self._first(raw, "title", "jobTitle", "position", "positionName", "job_title"),
-            company=self._first(raw, "companyName", "company", "companyTitle", "company_name", "organization"),
-            location=self._first(raw, "location", "jobLocation", "place", "job_location"),
-            description=self._first(raw, "description", "jobDescription", "descriptionText", "job_description"),
-            apply_link=self._first(raw, "applyUrl", "jobUrl", "url", "link", "job_url", "jobPostingUrl"),
-            salary_range=self._first(raw, "salary", "salaryRange", "salaryInfo", "compensation"),
-            experience_required=self._first(raw, "experienceLevel", "experience", "seniorityLevel", "seniority_level"),
-            employment_type=self._first(raw, "employmentType", "jobType", "contractType", "employment_type"),
-            posted_at=self._first(raw, "postedAt", "listedAt", "postedDate", "postedTime", "posted_time", "publishedAt"),
-            company_logo=self._first(raw, "companyLogo", "logo", "company_logo_url"),
+            title=self._first(raw, "title", "jobTitle", "position",
+                              "positionName", "job_title"),
+            company=self._first(raw, "companyName", "company", "companyTitle",
+                                "company_name", "organization"),
+            location=self._first(raw, "location", "jobLocation", "place",
+                                 "job_location"),
+            description=self._first(raw, "description", "jobDescription",
+                                    "descriptionText", "job_description"),
+            apply_link=self._first(raw, "applyUrl", "jobUrl", "url", "link",
+                                   "job_url", "jobPostingUrl"),
+            salary_range=self._first(raw, "salary", "salaryRange",
+                                     "salaryInfo", "compensation"),
+            experience_required=self._first(raw, "experienceLevel",
+                                            "experience", "seniorityLevel",
+                                            "seniority_level"),
+            employment_type=self._first(raw, "employmentType", "jobType",
+                                        "contractType", "employment_type"),
+            posted_at=self._first(raw, "postedAt", "listedAt", "postedDate",
+                                  "postedTime", "posted_time", "publishedAt"),
+            company_logo=self._first(raw, "companyLogo", "logo",
+                                     "company_logo_url"),
         )
 
     def _normalize_indeed(self, raw: dict) -> dict:
@@ -234,69 +270,89 @@ class ApifyService:
             company=self._first(raw, "company", "companyName"),
             location=self._first(raw, "location", "jobLocation", "locations"),
             description=self._first(raw, "description", "jobDescription", "jd"),
-            apply_link=self._first(raw, "jdURL", "url", "jobUrl", "applyUrl", "link"),
+            apply_link=self._first(raw, "jdURL", "url", "jobUrl",
+                                   "applyUrl", "link"),
             salary_range=self._first(raw, "salary", "salaryRange"),
-            experience_required=self._first(raw, "experience", "experienceRequired"),
+            experience_required=self._first(raw, "experience",
+                                            "experienceRequired"),
             employment_type=self._first(raw, "jobType", "employmentType"),
             posted_at=self._first(raw, "postedAt", "postedDate", "createdDate"),
         )
 
     def _normalize_glassdoor(self, raw: dict) -> dict:
+        """
+        valig/glassdoor-jobs-scraper field names (and common variants).
+        """
         return self._job(
             raw,
             source="Glassdoor",
-            title=self._first(raw, "title", "jobTitle", "job_title"),
-            company=self._first(raw, "company", "companyName", "employerName"),
-            location=self._first(raw, "location", "jobLocation"),
-            description=self._first(raw, "description", "jobDescription"),
-            apply_link=self._first(raw, "url", "jobUrl", "applyUrl", "link"),
-            salary_range=self._first(raw, "salary", "salaryEstimate", "salaryRange"),
-            experience_required=self._first(raw, "experience", "experienceLevel"),
-            employment_type=self._first(raw, "jobType", "employmentType"),
-            posted_at=self._first(raw, "postedAt", "postedDate", "age"),
-            company_logo=self._first(raw, "companyLogo", "logo"),
+            title=self._first(raw, "jobTitle", "title", "job_title",
+                              "position", "positionName"),
+            company=self._first(raw, "employerName", "company", "companyName",
+                                "employer", "organization"),
+            location=self._first(raw, "location", "jobLocation",
+                                 "locationName", "city"),
+            description=self._first(raw, "description", "jobDescription",
+                                    "fullDescription", "jobListing"),
+            apply_link=self._first(raw, "jobViewUrl", "url", "applyUrl",
+                                   "jobUrl", "link", "applyLink"),
+            salary_range=self._first(raw, "salaryEstimate", "salary",
+                                     "salaryRange", "payRange",
+                                     "estimatedSalary"),
+            experience_required=self._first(raw, "seniorityLevel",
+                                            "experience", "experienceLevel",
+                                            "seniority"),
+            employment_type=self._first(raw, "jobType", "employmentType",
+                                        "contractType"),
+            posted_at=self._first(raw, "listingAge", "postedAt",
+                                  "postedDate", "age", "datePosted"),
+            company_logo=self._first(raw, "squareLogo", "companyLogo",
+                                     "logo", "employerLogo"),
         )
+
+    # ------------------------------------------------------------------ #
+    #  SHARED JOB BUILDER
+    # ------------------------------------------------------------------ #
 
     def _job(self, raw: dict, source: str, **fields) -> dict:
         apply_link = fields.get("apply_link", "") or self._extract_any_url(raw)
         if not apply_link:
-            apply_link = self._fallback_search_url(source, fields.get("title", ""), fields.get("company", ""))
+            apply_link = self._fallback_search_url(
+                source, fields.get("title", ""), fields.get("company", "")
+            )
         return {
-            "title": fields.get("title", ""),
-            "company": fields.get("company", ""),
-            "location": fields.get("location", ""),
-            "description": fields.get("description", ""),
-            "apply_link": apply_link,
-            "source": source,
-            "salary_range": fields.get("salary_range", ""),
+            "title":               fields.get("title", ""),
+            "company":             fields.get("company", ""),
+            "location":            fields.get("location", ""),
+            "description":         fields.get("description", ""),
+            "apply_link":          apply_link,
+            "source":              source,
+            "salary_range":        fields.get("salary_range", ""),
             "experience_required": fields.get("experience_required", ""),
-            "employment_type": fields.get("employment_type", ""),
-            "posted_at": fields.get("posted_at", ""),
-            "company_logo": fields.get("company_logo", ""),
-            "raw_data": raw,
-            "fetched_at": datetime.utcnow(),
+            "employment_type":     fields.get("employment_type", ""),
+            "posted_at":           fields.get("posted_at", ""),
+            "company_logo":        fields.get("company_logo", ""),
+            "raw_data":            raw,
+            "fetched_at":          datetime.utcnow(),
         }
 
     def _extract_any_url(self, raw: dict) -> str:
-        """Named fields miss ho jaayein to kisi bhi url-jaise key ko scan
-        karo — actor schema thoda change ho to bhi link mil jaaye."""
+        """Scan all string values for a URL-like field when named fields miss."""
         for key, value in raw.items():
             if not isinstance(value, str) or not value.startswith("http"):
                 continue
-            if any(token in key.lower() for token in ("url", "link", "apply", "jd")):
+            if any(token in key.lower() for token in ("url", "link", "apply", "jd", "view")):
                 return value
         return ""
 
     def _fallback_search_url(self, source: str, title: str, company: str) -> str:
-        """Absolute last resort: koi bhi direct link na mile to user ko
-        ek direct search link de do jaha se woh khud job dhoondh ke apply
-        kar sake — pura khaali apply_link kabhi mat chhodo."""
+        """Last-resort search URL so apply_link is never empty."""
         from urllib.parse import quote
         query = quote(f"{title} {company}".strip())
         urls = {
-            "LinkedIn": f"https://www.linkedin.com/jobs/search/?keywords={query}",
-            "Indeed": f"https://in.indeed.com/jobs?q={query}",
-            "Naukri": f"https://www.naukri.com/{quote((title or '').lower().replace(' ', '-'))}-jobs",
+            "LinkedIn":  f"https://www.linkedin.com/jobs/search/?keywords={query}",
+            "Indeed":    f"https://in.indeed.com/jobs?q={query}",
+            "Naukri":    f"https://www.naukri.com/{quote((title or '').lower().replace(' ', '-'))}-jobs",
             "Glassdoor": f"https://www.glassdoor.co.in/Job/jobs.htm?sc.keyword={query}",
         }
         return urls.get(source, "")
@@ -333,7 +389,7 @@ class ApifyService:
 
     def _round_robin(self, job_groups: list[list[dict]]) -> list[dict]:
         merged = []
-        max_len = max((len(group) for group in job_groups), default=0)
+        max_len = max((len(g) for g in job_groups), default=0)
         for index in range(max_len):
             for group in job_groups:
                 if index < len(group):

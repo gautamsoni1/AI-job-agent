@@ -26,6 +26,7 @@ class PipelineRunResponse(BaseModel):
     ats_iterations: int
     resume_optimized: bool
     optimized_resume_id: Optional[str] = None
+    optimized_resume_download_url: Optional[str] = None
     meets_ats_target: bool = True
     ats_quality_warning: Optional[dict] = None
     jobs_found: int

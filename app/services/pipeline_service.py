@@ -204,7 +204,9 @@ class PipelineService:
         keywords = self._build_keywords(target_role, inferred_role, parsed)
         location_list = locations or self._get_user_locations(user)
         apify = ApifyService()
-        raw_jobs = await apify.fetch_jobs(keywords, location_list, candidate_level, max_results=max_jobs * 3)
+        # Sirf utna hi fetch karo jitna user ne manga — 1.5x sirf dedup loss ke liye
+        fetch_limit = min(max_jobs * 2, max_jobs + 20)
+        raw_jobs = await apify.fetch_jobs(keywords, location_list, candidate_level, max_results=fetch_limit)
 
         resume_skill_set = {s.lower() for s in parsed.get("skills_found", [])}
         role_keyword_set = {k.lower() for k in keywords if len(k) > 2}
@@ -328,6 +330,7 @@ class PipelineService:
                 "try a different target role or location."
             )
 
+        final_resume_id = latest_resume_id if iteration > 0 else None
         return {
             "pipeline_id": pipeline_id,
             "resume_id": resume_id,
@@ -336,7 +339,13 @@ class PipelineService:
             "final_ats_score": ats_data.get("ats_score", 0.0),
             "ats_iterations": iteration,
             "resume_optimized": iteration > 0,
-            "optimized_resume_id": latest_resume_id if iteration > 0 else None,
+            "optimized_resume_id": final_resume_id,
+            # Direct URL so frontend can show Download + Preview button immediately
+            "optimized_resume_download_url": (
+                f"/api/v1/resume/{final_resume_id}/download" if final_resume_id else None
+            ),
+            "meets_ats_target": meets_ats_target,
+            "ats_quality_warning": ats_quality_warning,
             "jobs_found": len(saved_jobs),
             "jobs": [self._to_pipeline_job_item(j) for j in saved_jobs],
             "before_apply_sheet_url": f"/api/v1/pipeline/{pipeline_id}/download/before-apply",
@@ -584,8 +593,13 @@ class PipelineService:
             return f"{skills[0]} Professional"
         return "General Professional Role"
 
+    # NAYA (yahi daalo)
     def _build_keywords(self, target_role: Optional[str], inferred_role: str, parsed: dict) -> list[str]:
-        base = target_role.split() if target_role else inferred_role.replace("Professional", "").split()
+        if target_role and target_role.strip():
+            # User ne bataya hai — sirf wahi lao, kuch aur mat milao
+            return target_role.strip().split()[:8]
+        # User ne kuch nahi bataya — resume se infer karo
+        base = inferred_role.replace("Professional", "").split()
         skills = parsed.get("skills_found", []) or []
         keywords = list(dict.fromkeys([*base, *skills[:5]]))
         return keywords[:8] or ["Software Engineer"]
@@ -601,15 +615,15 @@ class PipelineService:
             (job.get("location") or "").strip().lower(),
         )
 
-    def _looks_relevant(self, job: dict, resume_skills: set, role_keywords: set) -> bool:
-        if not resume_skills and not role_keywords:
-            return True
-        text = f"{job.get('title','')} {job.get('description','')[:500]}".lower()
-        if any(skill in text for skill in resume_skills):
-            return True
-        if any(kw in text for kw in role_keywords):
-            return True
-        return False
+    # def _looks_relevant(self, job: dict, resume_skills: set, role_keywords: set) -> bool:
+    #     if not resume_skills and not role_keywords:
+    #         return True
+    #     text = f"{job.get('title','')} {job.get('description','')[:500]}".lower()
+    #     if any(skill in text for skill in resume_skills):
+    #         return True
+    #     if any(kw in text for kw in role_keywords):
+    #         return True
+    #     return False
 
     def _to_pipeline_job_item(self, job: dict) -> dict:
         scout = job.get("scout_report", {}) or {}
@@ -708,22 +722,31 @@ class PipelineService:
         return None    
     
     def _looks_relevant(self, job: dict, resume_skills: set, role_keywords: set) -> bool:
-        if not resume_skills and not role_keywords:
-            return True
-    
         title_text = (job.get("title") or "").lower()
-        desc_text = (job.get("description") or "")[:500].lower()
+        desc_text  = (job.get("description") or "")[:600].lower()
 
-        def _word_in(term: str, text: str) -> bool:
+        def word_in(term: str, text: str) -> bool:
             term = (term or "").strip().lower()
             if not term:
                 return False
-            return bool(re.search(r"(?<![a-zA-Z0-9])" + re.escape(term) + r"(?![a-zA-Z0-9])", text))
-    
-        all_terms = list(role_keywords) + list(resume_skills)
-    
-        if any(_word_in(term, title_text) for term in all_terms):
-            return True
-    
-        hits = sum(1 for term in all_terms if _word_in(term, desc_text))
-        return hits >= 2
+            return bool(
+                re.search(r"(?<![a-zA-Z0-9])" + re.escape(term) + r"(?![a-zA-Z0-9])", text)
+            )
+
+        # role_keywords hain (target_role se aaye) — title mein kam se kam 1 match REQUIRED
+        if role_keywords:
+            title_match = any(word_in(kw, title_text) for kw in role_keywords)
+            if not title_match:
+                # Title match nahi — description mein bhi check karo, >= 2 hits chahiye
+                desc_hits = sum(1 for kw in role_keywords if word_in(kw, desc_text))
+                if desc_hits < 2:
+                    return False
+
+        # role_keywords nahi hain (inferred role) — resume skills se loose match
+        if not role_keywords:
+            if not resume_skills:
+                return True
+            combined = title_text + " " + desc_text
+            return any(word_in(s, combined) for s in resume_skills)
+
+        return True
