@@ -1,5 +1,5 @@
 """
-Resume API Endpoints — Upload, Parse, Analyze, Optimize, Download
+Resume API Endpoints — Upload, Parse, Analyze, Optimize, Download, Preview
 """
 from mistralai_azure import Optional
 
@@ -96,7 +96,6 @@ async def upload_resume(
         "created_at": datetime.now(timezone.utc),
     })
 
-    # Update user skills
     # Update user skills
     if parsed.get("skills_found"):
         await db["users"].update_one(
@@ -459,6 +458,148 @@ async def download_resume(
         filename=resume.get("filename", "resume.pdf"),
         media_type="application/octet-stream",
     )
+
+
+@router.get("/{resume_id}/preview")
+async def preview_resume(
+    resume_id: str,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """
+    Return a PDF of the resume suitable for inline browser preview.
+
+    Strategy (in priority order):
+    1. If a generated_file_path exists and ends in .pdf  → serve it directly.
+    2. If generated_file_path exists and ends in .docx   → convert to PDF
+       using WeasyPrint via ResumeGeneratorService, cache the PDF path.
+    3. If only original file_path (the uploaded file) exists:
+       - .pdf  → serve directly.
+       - .docx → convert to PDF.
+    4. If nothing works → 404.
+
+    The PDF is returned with Content-Disposition: inline so the browser
+    renders it in-tab instead of triggering a download.
+    """
+    import os
+    import tempfile
+
+    repo = ResumeRepository(db)
+    resume = await repo.get_by_id(resume_id)
+    if not resume or resume.get("user_id") != str(current_user["_id"]):
+        raise NotFoundError("Resume", resume_id)
+
+    # ── 1. Determine the best source file ──────────────────────────────
+    generated_path = resume.get("generated_file_path", "") or ""
+    original_path = resume.get("file_path", "") or ""
+
+    source_path = ""
+    if generated_path and os.path.exists(generated_path):
+        source_path = generated_path
+    elif original_path and os.path.exists(original_path):
+        source_path = original_path
+
+    if not source_path:
+        raise NotFoundError("Resume file", resume_id)
+
+    # ── 2. If already a PDF → serve inline ─────────────────────────────
+    if source_path.lower().endswith(".pdf"):
+        return FileResponse(
+            path=source_path,
+            media_type="application/pdf",
+            headers={"Content-Disposition": "inline"},
+        )
+
+    # ── 3. DOCX → PDF via WeasyPrint ───────────────────────────────────
+    # Check if we already converted this resume to PDF and cached it
+    cached_pdf_path = resume.get("preview_pdf_path", "") or ""
+    if cached_pdf_path and os.path.exists(cached_pdf_path):
+        return FileResponse(
+            path=cached_pdf_path,
+            media_type="application/pdf",
+            headers={"Content-Disposition": "inline"},
+        )
+
+    # Need to generate PDF from the optimized resume data stored in the doc
+    raw_text = resume.get("raw_text", "")
+    parsed_sections = resume.get("parsed_sections", {}) or {}
+
+    # Build resume_data dict for the template — reuse _build_preview_data
+    resume_data = _build_preview_resume_data(resume)
+
+    try:
+        generator = ResumeGeneratorService()
+        pdf_path = await generator.generate_pdf(
+            resume_data=resume_data,
+            template="resume_ats_clean",
+            user_id=str(current_user["_id"]),
+        )
+    except Exception as e:
+        import structlog
+        structlog.get_logger().error("preview_pdf_generation_failed",
+                                     resume_id=resume_id, error=str(e))
+        raise NotFoundError("Preview PDF (generation failed)", resume_id)
+
+    # Cache the generated PDF path so next preview is instant
+    await repo.update(resume_id, {"preview_pdf_path": pdf_path})
+
+    return FileResponse(
+        path=pdf_path,
+        media_type="application/pdf",
+        headers={"Content-Disposition": "inline"},
+    )
+
+
+# ---------------------------------------------------------------------------
+# INTERNAL HELPERS
+# ---------------------------------------------------------------------------
+
+def _build_preview_resume_data(resume: dict) -> dict:
+    """
+    Construct the template-compatible dict from what's stored in the
+    resume MongoDB document. Used exclusively by the preview endpoint
+    to avoid re-running AI when we already have optimized data saved.
+    """
+    parsed_sections = resume.get("parsed_sections", {}) or {}
+    raw_text = resume.get("raw_text", "")
+
+    # Contact — try parsed_sections first, then extract from raw_text
+    contact = parsed_sections.get("contact") or _extract_contact_from_text(raw_text)
+
+    # Skills — from extracted list or parsed_sections
+    skills = (
+        resume.get("skills_extracted")
+        or parsed_sections.get("skills")
+        or []
+    )
+
+    # Summary
+    summary = parsed_sections.get("summary", "")
+    if isinstance(summary, list):
+        summary = " ".join(summary)
+
+    # Experience
+    experience = parsed_sections.get("experience", []) or []
+
+    # Education
+    education = parsed_sections.get("education", []) or []
+
+    # Projects
+    projects = parsed_sections.get("projects", []) or []
+
+    # Full name — try to infer from raw_text
+    full_name = resume.get("full_name", "") or _guess_name(raw_text)
+
+    return {
+        "full_name": full_name,
+        "contact": contact if isinstance(contact, dict) else {},
+        "summary": summary if isinstance(summary, str) else "",
+        "skills": skills if isinstance(skills, list) else [],
+        "experience": experience if isinstance(experience, list) else [],
+        "education": education if isinstance(education, list) else [],
+        "projects": projects if isinstance(projects, list) else [],
+        "certifications": parsed_sections.get("certifications", []) or [],
+    }
 
 
 def _build_optimized_resume_data(original_resume: dict, ai_data: dict) -> dict:

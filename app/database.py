@@ -74,5 +74,13 @@ async def _create_indexes():
     await db.audit_logs.create_index([("user_id", 1), ("created_at", -1)])
     await db.agent_results.create_index([("user_id", 1), ("created_at", -1)])
     await db.preference_signals.create_index([("user_id", 1), ("recorded_at", -1)])
-    await db.pipeline_runs.create_index([("user_id", 1), ("created_at", -1)])
+
+    # pipeline_runs — compound index on (user_id, created_at) supports:
+    # 1. The 24h rate limit query: find_one({user_id, created_at >= window})
+    # 2. The history list: find({user_id}, sort created_at desc)
+    # Named explicitly so it's easy to reference in logs/explain plans.
+    await db.pipeline_runs.create_index(
+        [("user_id", 1), ("created_at", -1)],
+    )
+
     logger.info("MongoDB indexes created")

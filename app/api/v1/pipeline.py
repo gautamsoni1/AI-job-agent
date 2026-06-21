@@ -1,9 +1,13 @@
 """
 Pipeline API — single entry point: upload resume → analyze → ATS score/auto-
 improve → job discovery/scouting/matching → sheets → apply-all / apply-one.
+
+RATE LIMIT: Each verified user gets 1 free pipeline run per 24 hours.
+After 24 hours the limit resets and they can run again.
 """
 import os
 import uuid
+from datetime import datetime, timezone, timedelta
 from typing import Optional
 from fastapi import APIRouter, BackgroundTasks, Depends, UploadFile, File, Form, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
@@ -17,6 +21,58 @@ from app.schemas.pipeline import PipelineRunResponse, BulkApplyResponse, SingleA
 
 router = APIRouter()
 
+# ---------------------------------------------------------------------------
+# RATE LIMIT HELPER
+# ---------------------------------------------------------------------------
+
+async def _check_pipeline_rate_limit(user_id: str, db: AsyncIOMotorDatabase) -> None:
+    """
+    Enforce the 1-run-per-24-hours limit.
+
+    Looks at pipeline_runs collection for any document belonging to this
+    user that was created within the last 24 hours. If found, raises a
+    ValidationError (HTTP 422) with a clear message telling the user
+    exactly when their limit resets.
+
+    The index `pipeline_user_created` (added in database.py) makes this
+    query a fast indexed scan even with millions of pipeline_runs rows.
+    """
+    window_start = datetime.now(timezone.utc) - timedelta(hours=24)
+
+    # Convert to naive UTC for comparison (MongoDB stores naive datetimes
+    # via datetime.utcnow() calls throughout the codebase).
+    window_start_naive = window_start.replace(tzinfo=None)
+
+    recent_run = await db["pipeline_runs"].find_one(
+        {
+            "user_id": user_id,
+            "created_at": {"$gte": window_start_naive},
+        },
+        # Only fetch the timestamp field we need — no full document load
+        {"created_at": 1},
+    )
+
+    if recent_run:
+        run_time: datetime = recent_run["created_at"]
+        # Ensure naive for arithmetic
+        if run_time.tzinfo is not None:
+            run_time = run_time.replace(tzinfo=None)
+        reset_at = run_time + timedelta(hours=24)
+        now_naive = datetime.utcnow()
+        time_left = reset_at - now_naive
+        hours_left = int(time_left.total_seconds() // 3600)
+        minutes_left = int((time_left.total_seconds() % 3600) // 60)
+
+        raise ValidationError(
+            f"Free plan allows 1 pipeline run per 24 hours. "
+            f"Your limit resets in {hours_left}h {minutes_left}m. "
+            f"Next run available at {reset_at.strftime('%Y-%m-%d %H:%M UTC')}."
+        )
+
+
+# ---------------------------------------------------------------------------
+# ENDPOINTS
+# ---------------------------------------------------------------------------
 
 @router.post("/run", response_model=PipelineRunResponse, status_code=201)
 async def run_pipeline(
@@ -28,6 +84,10 @@ async def run_pipeline(
     current_user: dict = Depends(get_verified_user),
     db: AsyncIOMotorDatabase = Depends(get_db),
 ):
+    # ── Rate limit check ────────────────────────────────────────────────
+    await _check_pipeline_rate_limit(str(current_user["_id"]), db)
+    # ────────────────────────────────────────────────────────────────────
+
     if file.content_type not in (
         "application/pdf",
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -50,7 +110,6 @@ async def run_pipeline(
     return result
 
 
-
 @router.post("/run/start")
 async def start_pipeline(
     background_tasks: BackgroundTasks,
@@ -65,6 +124,11 @@ async def start_pipeline(
     """Pipeline ko background mein start karta hai aur turant run_id +
     websocket_url return kar deta hai. Live progress ke liye us URL par
     connect karo; final result DONE event ke 'data' field mein aayega."""
+
+    # ── Rate limit check (same guard for async start path) ──────────────
+    await _check_pipeline_rate_limit(str(current_user["_id"]), db)
+    # ────────────────────────────────────────────────────────────────────
+
     if file.content_type not in (
         "application/pdf",
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -118,6 +182,56 @@ async def pipeline_history(
     service = PipelineService(db)
     runs = await service.list_runs(str(current_user["_id"]))
     return {"success": True, "runs": runs}
+
+
+@router.get("/rate-limit-status")
+async def rate_limit_status(
+    current_user: dict = Depends(get_verified_user),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """
+    Frontend can call this to show the user their current rate limit state
+    without attempting a run. Returns can_run, next_run_at, hours_remaining.
+    """
+    window_start = datetime.now(timezone.utc) - timedelta(hours=24)
+    window_start_naive = window_start.replace(tzinfo=None)
+
+    recent_run = await db["pipeline_runs"].find_one(
+        {
+            "user_id": str(current_user["_id"]),
+            "created_at": {"$gte": window_start_naive},
+        },
+        {"created_at": 1},
+    )
+
+    if not recent_run:
+        return {
+            "success": True,
+            "can_run": True,
+            "next_run_at": None,
+            "hours_remaining": 0,
+            "message": "You can run the pipeline now.",
+        }
+
+    run_time: datetime = recent_run["created_at"]
+    if run_time.tzinfo is not None:
+        run_time = run_time.replace(tzinfo=None)
+    reset_at = run_time + timedelta(hours=24)
+    time_left = reset_at - datetime.utcnow()
+    hours_left = max(0, int(time_left.total_seconds() // 3600))
+    minutes_left = max(0, int((time_left.total_seconds() % 3600) // 60))
+
+    return {
+        "success": True,
+        "can_run": False,
+        "next_run_at": reset_at.strftime("%Y-%m-%d %H:%M UTC"),
+        "hours_remaining": hours_left,
+        "minutes_remaining": minutes_left,
+        "message": (
+            f"Free plan: 1 pipeline run per 24 hours. "
+            f"Next run available in {hours_left}h {minutes_left}m."
+        ),
+    }
 
 
 @router.get("/{pipeline_id}")
