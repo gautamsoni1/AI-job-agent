@@ -6,6 +6,7 @@ discovery/scouting/matching → sheet export → honest apply.
 import re
 from datetime import datetime, timezone
 from typing import Optional
+from app.core.progress import progress_manager
 
 import structlog
 from bson import ObjectId
@@ -82,9 +83,13 @@ class PipelineService:
         job_description: Optional[str],
         locations: Optional[list[str]],
         max_jobs: int,
+        run_id: Optional[str] = None,
     ) -> dict:
         user_id = str(user["_id"])
         now = datetime.now(timezone.utc)
+
+        if run_id:
+            await progress_manager.emit(run_id, "RESUME_PARSING", "Resume upload ho raha hai...", percent=5)
 
         # 1. Save + parse resume
         storage = StorageService()
@@ -119,11 +124,24 @@ class PipelineService:
             )
         await self._log_timeline(user_id, "RESUME_UPLOADED", f"Resume uploaded: {filename}", {"resume_id": resume_id})
 
+        if run_id:
+            await progress_manager.emit(
+                run_id, "RESUME_PARSED",
+                f"Resume parse ho gaya — {parsed.get('word_count', 0)} words extracted.",
+                percent=15,
+            )
+            await progress_manager.emit(run_id, "RESUME_ANALYZING", "AI resume analysis chal raha hai...", percent=20)
+
         # 2. AI analysis
         await self.orchestrator.execute(
             agent_name="resume_agent", task="analyze", user_id=user_id,
             payload={"resume_text": resume_doc["raw_text"], "target_role": target_role or ""},
         )
+
+        if run_id:
+            await progress_manager.emit(run_id, "RESUME_ANALYZED", "Resume analysis complete.", percent=25)
+
+        # 3. Job description for ATS scoring
 
         # 3. Job description for ATS scoring
         inferred_role = self._infer_role_from_resume(parsed)
@@ -144,13 +162,23 @@ class PipelineService:
         latest_resume_id = resume_id
         iteration = 0
 
+        if run_id:
+            await progress_manager.emit(run_id, "ATS_SCORING", "ATS score calculate ho raha hai...", percent=30)
+
         ats_result = await self.orchestrator.execute(
             agent_name="ats_agent", task="score", user_id=user_id,
             payload={"resume_text": current_text, "job_description": effective_jd},
         )
         ats_data = ats_result.data
         initial_ats_score = ats_data.get("ats_score", 0.0)
-        
+
+        if run_id:
+            await progress_manager.emit(
+                run_id, "ATS_SCORED",
+                f"Initial ATS score: {initial_ats_score:.0f}/100",
+                percent=35,
+            )
+
         best_score = initial_ats_score
         best_text = current_text
         best_resume_doc = latest_resume_doc
@@ -159,6 +187,12 @@ class PipelineService:
         
         while ats_data.get("ats_score", 0) < ATS_TARGET_SCORE and iteration < MAX_ATS_ITERATIONS:
             iteration += 1
+            if run_id:
+                await progress_manager.emit(
+                    run_id, "ATS_IMPROVING",
+                    f"ATS improvement iteration {iteration}/{MAX_ATS_ITERATIONS}...",
+                    percent=35 + iteration * 5,
+                )
             # ... (existing rewrite + docx generation + save_version code as-is) ...
         
             ats_result = await self.orchestrator.execute(
@@ -166,6 +200,13 @@ class PipelineService:
                 payload={"resume_text": current_text, "job_description": effective_jd},
             )
             ats_data = ats_result.data
+
+            if run_id:
+                await progress_manager.emit(
+                    run_id, "ATS_IMPROVING",
+                    f"Iteration {iteration} ke baad score: {ats_data.get('ats_score', 0):.0f}/100",
+                    percent=35 + iteration * 5,
+                )
         
             if ats_data.get("ats_score", 0) > best_score:
                 best_score = ats_data.get("ats_score", 0)
@@ -184,6 +225,13 @@ class PipelineService:
         if iteration > 0:
             await self.resume_repo.set_active(user_id, latest_resume_id)
         
+        if run_id:
+            await progress_manager.emit(
+                run_id, "ATS_DONE",
+                f"Final ATS score: {best_score:.0f}/100",
+                percent=55,
+            )
+
         meets_ats_target = best_score >= ATS_TARGET_SCORE
         ats_quality_warning = None
         if not meets_ats_target:
@@ -203,10 +251,21 @@ class PipelineService:
 
         keywords = self._build_keywords(target_role, inferred_role, parsed)
         location_list = locations or self._get_user_locations(user)
+
+        if run_id:
+            await progress_manager.emit(run_id, "JOB_FETCHING", "Jobs fetch ho rahe hain (LinkedIn, Indeed, Naukri, Glassdoor)...", percent=60)
+
         apify = ApifyService()
         # Sirf utna hi fetch karo jitna user ne manga — 1.5x sirf dedup loss ke liye
         fetch_limit = min(max_jobs * 2, max_jobs + 20)
         raw_jobs = await apify.fetch_jobs(keywords, location_list, candidate_level, max_results=fetch_limit)
+
+        if run_id:
+            await progress_manager.emit(
+                run_id, "JOB_FETCHED",
+                f"{len(raw_jobs)} raw jobs mile — ab filter/scout/match kar rahe hain...",
+                percent=65,
+            )
 
         resume_skill_set = {s.lower() for s in parsed.get("skills_found", [])}
         role_keyword_set = {k.lower() for k in keywords if len(k) > 2}
@@ -277,6 +336,15 @@ class PipelineService:
             })
             saved_jobs.append(job_with_id)
 
+            if run_id:
+                pct = 65 + int(min(len(saved_jobs) / max(max_jobs, 1), 1.0) * 30)
+                await progress_manager.emit(
+                    run_id, "JOB_MATCHED",
+                    f"{len(saved_jobs)}/{max_jobs} jobs found — latest: {job_with_id.get('title')} @ {job_with_id.get('company')}",
+                    percent=pct,
+                    data={"jobs_found": len(saved_jobs), "max_jobs": max_jobs},
+                )
+
             # REPLACE this inline block:
             try:
                 if settings.GOOGLE_SHEET_ID:
@@ -289,6 +357,9 @@ class PipelineService:
             await self._sync_to_sheets_safe(job_with_id, match_score=overall_match, ats_score=ats_data.get("ats_score", 0))
 
         saved_jobs.sort(key=lambda j: (week_bucket(j.get("posted_at") or j.get("posted_date")), -j.get("match_score", 0)))
+
+        if run_id:
+            await progress_manager.emit(run_id, "EXPORTING", "Spreadsheet ban raha hai...", percent=97)
 
         # 6. Persist pipeline run + export "before apply" sheet
         pipeline_doc = {
@@ -667,7 +738,26 @@ class PipelineService:
             "metadata": metadata, "created_at": datetime.now(timezone.utc),
         })
 
-
+    
+    async def run_pipeline_tracked(
+        self, run_id: str, user: dict, file_bytes: bytes, filename: str,
+        target_role: Optional[str], job_description: Optional[str],
+        locations: Optional[list[str]], max_jobs: int,
+    ) -> None:
+        """BackgroundTasks se call hota hai. run_pipeline() ko wrap karta hai
+        aur har stage par WebSocket subscribers ko progress emit karta hai.
+        Final result DONE event ke data field mein milta hai."""
+        try:
+            result = await self.run_pipeline(
+                user=user, file_bytes=file_bytes, filename=filename,
+                target_role=target_role, job_description=job_description,
+                locations=locations, max_jobs=max_jobs, run_id=run_id,
+            )
+            await progress_manager.emit(run_id, "DONE", "Pipeline complete.", percent=100, data=result)
+        except Exception as e:
+            logger.error("pipeline_tracked_failed", run_id=run_id, error=str(e))
+            await progress_manager.emit(run_id, "ERROR", f"Pipeline failed: {e}", percent=None)
+    
     async def _attempt_real_apply(self, user: dict, pipeline: dict, job: dict) -> dict:
         user_id = str(user["_id"])
         resume_text_for_letter = pipeline.get("final_resume_text", "")

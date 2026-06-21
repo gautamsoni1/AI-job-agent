@@ -3,10 +3,12 @@ Pipeline API — single entry point: upload resume → analyze → ATS score/aut
 improve → job discovery/scouting/matching → sheets → apply-all / apply-one.
 """
 import os
+import uuid
 from typing import Optional
-from fastapi import APIRouter, Depends, UploadFile, File, Form
+from fastapi import APIRouter, BackgroundTasks, Depends, UploadFile, File, Form, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from motor.motor_asyncio import AsyncIOMotorDatabase
+from app.core.progress import progress_manager
 
 from app.core.dependencies import get_db, get_verified_user
 from app.core.exceptions import NotFoundError, ValidationError
@@ -46,6 +48,66 @@ async def run_pipeline(
         max_jobs=max(1, min(max_jobs, 40)),
     )
     return result
+
+
+
+@router.post("/run/start")
+async def start_pipeline(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(..., description="Resume file — PDF or DOCX"),
+    target_role: Optional[str] = Form(None),
+    job_description: Optional[str] = Form(None),
+    locations: Optional[str] = Form(None),
+    max_jobs: int = Form(15),
+    current_user: dict = Depends(get_verified_user),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """Pipeline ko background mein start karta hai aur turant run_id +
+    websocket_url return kar deta hai. Live progress ke liye us URL par
+    connect karo; final result DONE event ke 'data' field mein aayega."""
+    if file.content_type not in (
+        "application/pdf",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ):
+        raise ValidationError("Only PDF and DOCX files are allowed.")
+
+    file_bytes = await file.read()
+    location_list = [loc.strip() for loc in locations.split(",") if loc.strip()] if locations else None
+    run_id = str(uuid.uuid4())
+
+    service = PipelineService(db)
+    background_tasks.add_task(
+        service.run_pipeline_tracked,
+        run_id,
+        current_user,
+        file_bytes,
+        file.filename or "resume",
+        target_role,
+        job_description,
+        location_list,
+        max(1, min(max_jobs, 40)),
+    )
+    return {
+        "success": True,
+        "run_id": run_id,
+        "websocket_url": f"/api/v1/pipeline/ws/{run_id}",
+    }
+
+
+@router.websocket("/ws/{run_id}")
+async def pipeline_progress_ws(websocket: WebSocket, run_id: str):
+    await websocket.accept()
+    queue = await progress_manager.subscribe(run_id)
+    try:
+        while True:
+            event = await queue.get()
+            await websocket.send_json(event)
+            if event["stage"] in ("DONE", "ERROR"):
+                break
+    except WebSocketDisconnect:
+        pass
+    finally:
+        await progress_manager.unsubscribe(run_id, queue)
 
 
 @router.get("/history")

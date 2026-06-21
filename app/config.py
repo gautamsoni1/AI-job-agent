@@ -49,6 +49,8 @@ class Settings(BaseSettings):
     # slots are skipped automatically, so you don't need all 5 for every
     # provider to get started.
     # ==========================================
+    
+    
 
     # --- Groq (primary). Open-source Llama/Mixtral family models. ---
     GROQ_API_KEY_1: str = ""

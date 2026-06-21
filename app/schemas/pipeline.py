@@ -51,3 +51,5 @@ class SingleApplyResponse(BaseModel):
     status: str
     application_id: Optional[str] = None
     message: str
+
+    

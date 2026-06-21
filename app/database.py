@@ -3,6 +3,7 @@ MongoDB Motor Async Connection Manager
 """
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
 from app.config import settings
+
 import structlog
 
 logger = structlog.get_logger(__name__)
