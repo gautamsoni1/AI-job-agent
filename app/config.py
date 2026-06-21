@@ -35,22 +35,7 @@ class Settings(BaseSettings):
 
     # ==========================================
     # AI — MULTI-PROVIDER, MULTI-KEY, OPEN-SOURCE MODELS ONLY
-    # ------------------------------------------
-    # Provider chain (in order): GROQ -> MISTRAL -> GEMINI
-    # Each provider has up to 5 API keys that are round-robined per
-    # request (request 1 -> key 1, request 2 -> key 2, ... request 6 ->
-    # key 1 again). This spreads load across keys so per-key free-tier
-    # quotas last longer.
-    #
-    # If a call fails/rate-limits on EVERY key of the current provider,
-    # the whole provider is considered exhausted for that call and the
-    # client automatically falls through to the next provider in the
-    # chain. Only the keys you actually fill in .env are used — empty
-    # slots are skipped automatically, so you don't need all 5 for every
-    # provider to get started.
     # ==========================================
-    
-    
 
     # --- Groq (primary). Open-source Llama/Mixtral family models. ---
     GROQ_API_KEY_1: str = ""
@@ -58,24 +43,18 @@ class Settings(BaseSettings):
     GROQ_API_KEY_3: str = ""
     GROQ_API_KEY_4: str = ""
     GROQ_API_KEY_5: str = ""
-    # NOTE: mistral-saba-24b was deprecated by Groq on 07/30/2025 and
-    # mixtral-8x7b-32768 on 03/20/2025 - both return errors now. Using
-    # currently-live, stable, open-source Groq models instead.
     GROQ_PRIMARY_MODEL: str = "llama-3.3-70b-versatile"
     GROQ_FALLBACK_MODEL: str = "llama-3.1-8b-instant"
     GROQ_MAX_RETRIES: int = 3
 
     # --- Mistral (2nd fallback provider). Official api.mistral.ai. ---
-    # Open-weight Mistral models (e.g. open-mistral-7b / mistral-small).
     MISTRAL_API_KEY_1: str = ""
     MISTRAL_API_KEY_2: str = ""
     MISTRAL_API_KEY_3: str = ""
     MISTRAL_API_KEY_4: str = ""
     MISTRAL_API_KEY_5: str = ""
-    # --- Mistral (2nd fallback provider)
-    MISTRAL_PRIMARY_MODEL: str = "mistral-small-latest"   # rolling alias, auto-updates
-    MISTRAL_FALLBACK_MODEL: str = "mistral-medium-latest"  # rolling alias, auto-updates
-     # confirmed active till Oct 16, 2026
+    MISTRAL_PRIMARY_MODEL: str = "mistral-small-latest"
+    MISTRAL_FALLBACK_MODEL: str = "mistral-medium-latest"
     MISTRAL_MAX_RETRIES: int = 3
 
     # --- Gemini (3rd / last fallback provider). Free-tier friendly. ---
@@ -84,13 +63,12 @@ class Settings(BaseSettings):
     GEMINI_API_KEY_3: str = ""
     GEMINI_API_KEY_4: str = ""
     GEMINI_API_KEY_5: str = ""
-   
-    GEMINI_PRIMARY_MODEL: str = "gemini-flash-latest"       # official rolling alias
-    GEMINI_FALLBACK_MODEL: str = "gemini-2.5-flash-lite"     # confirmed active till Oct 16, 2026
+    GEMINI_PRIMARY_MODEL: str = "gemini-flash-latest"
+    GEMINI_FALLBACK_MODEL: str = "gemini-2.5-flash-lite"
     GEMINI_MAX_RETRIES: int = 3
 
     # Overall LLM behavior
-    LLM_PROVIDER_ORDER: str = "groq,mistral,gemini"  # comma-separated, order = fallback order
+    LLM_PROVIDER_ORDER: str = "groq,mistral,gemini"
 
     # ==========================================
     # CHROMADB (OPEN SOURCE)
@@ -108,8 +86,6 @@ class Settings(BaseSettings):
     UPLOAD_PATH: str = "./uploads"
     GENERATED_RESUME_PATH: str = "./generated_resumes"
     GENERATED_COVER_LETTER_PATH: str = "./generated_cover_letters"
-    # Kept for backward compatibility with code that still reads
-    # GENERATED_FILES_PATH (e.g. storage_service.py's save_generated_file).
     GENERATED_FILES_PATH: str = "./generated_files"
 
     # ==========================================
@@ -174,8 +150,6 @@ class Settings(BaseSettings):
     # ==========================================
     # CORS
     # ==========================================
-    # Comma-separated in .env; use the cors_origins_list property below
-    # to get an actual list[str] wherever main.py needs it.
     CORS_ORIGINS: str = "http://localhost:3000,http://127.0.0.1:3000"
 
     # ==========================================
@@ -189,40 +163,38 @@ class Settings(BaseSettings):
     DEBUG: bool = True
     AUTO_RELOAD: bool = True
 
+    # ------------------------------------------------------------------
+    # COMPUTED PROPERTIES
+    # ------------------------------------------------------------------
+
     @property
     def cors_origins_list(self) -> list[str]:
-        """CORS_ORIGINS as a clean list, e.g. for FastAPI's allow_origins=."""
         return [origin.strip() for origin in self.CORS_ORIGINS.split(",") if origin.strip()]
 
     @property
     def allowed_resume_types_list(self) -> list[str]:
-        """ALLOWED_RESUME_TYPES as a clean list, e.g. ['pdf', 'docx']."""
         return [t.strip().lower() for t in self.ALLOWED_RESUME_TYPES.split(",") if t.strip()]
 
     @property
     def groq_api_keys(self) -> list[str]:
-        """All non-empty Groq keys, in order — used for round-robin rotation."""
         keys = [self.GROQ_API_KEY_1, self.GROQ_API_KEY_2, self.GROQ_API_KEY_3,
                 self.GROQ_API_KEY_4, self.GROQ_API_KEY_5]
         return [k.strip() for k in keys if k and k.strip()]
 
     @property
     def mistral_api_keys(self) -> list[str]:
-        """All non-empty Mistral keys, in order — used for round-robin rotation."""
         keys = [self.MISTRAL_API_KEY_1, self.MISTRAL_API_KEY_2, self.MISTRAL_API_KEY_3,
                 self.MISTRAL_API_KEY_4, self.MISTRAL_API_KEY_5]
         return [k.strip() for k in keys if k and k.strip()]
 
     @property
     def gemini_api_keys(self) -> list[str]:
-        """All non-empty Gemini keys, in order — used for round-robin rotation."""
         keys = [self.GEMINI_API_KEY_1, self.GEMINI_API_KEY_2, self.GEMINI_API_KEY_3,
                 self.GEMINI_API_KEY_4, self.GEMINI_API_KEY_5]
         return [k.strip() for k in keys if k and k.strip()]
 
     @property
     def llm_provider_order_list(self) -> list[str]:
-        """Provider fallback order as a list, e.g. ['groq', 'mistral', 'gemini']."""
         return [p.strip().lower() for p in self.LLM_PROVIDER_ORDER.split(",") if p.strip()]
 
 
@@ -232,3 +204,136 @@ def get_settings() -> Settings:
 
 
 settings = get_settings()
+
+
+# ==========================================
+# STARTUP VALIDATOR
+# Called once from app/main.py lifespan, before the server accepts
+# any requests. Raises RuntimeError with a clear message so the
+# developer sees exactly what is missing in .env instead of getting
+# a cryptic crash on the first real request.
+# ==========================================
+
+_PLACEHOLDER_PREFIXES = (
+    "your-",           # JWT defaults
+    "apify_api_token", # Apify placeholder
+)
+
+
+def _is_placeholder_or_empty(value: str) -> bool:
+    """Return True if the value is empty or one of the known placeholders."""
+    v = (value or "").strip()
+    if not v:
+        return True
+    for prefix in _PLACEHOLDER_PREFIXES:
+        if v.lower().startswith(prefix):
+            return True
+    return False
+
+
+def validate_startup_config() -> None:
+    """
+    Validate critical environment variables at server startup.
+
+    Rules
+    -----
+    HARD FAILURES (server refuses to start):
+      - JWT_SECRET_KEY / JWT_REFRESH_SECRET still set to the insecure defaults.
+      - Not a single valid LLM API key across all three providers
+        (Groq + Mistral + Gemini). At least one provider must be ready
+        or every AI feature will fail immediately.
+
+    WARNINGS (server starts, but logs a clear message):
+      - APIFY_TOKEN is missing / placeholder → job discovery disabled.
+      - EMAIL_USERNAME is empty → email features disabled.
+      - GOOGLE_SHEET_ID is empty → Google Sheets sync disabled.
+      - MongoDB URI still on localhost in a non-development environment.
+    """
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    # --- JWT secrets ---
+    if _is_placeholder_or_empty(settings.JWT_SECRET_KEY):
+        errors.append(
+            "JWT_SECRET_KEY is not set or still uses the insecure default. "
+            "Set a random 32+ character secret in .env."
+        )
+    if _is_placeholder_or_empty(settings.JWT_REFRESH_SECRET):
+        errors.append(
+            "JWT_REFRESH_SECRET is not set or still uses the insecure default. "
+            "Set a random 32+ character secret in .env."
+        )
+
+    # --- At least one LLM provider must have a valid key ---
+    has_groq = bool(settings.groq_api_keys)
+    has_mistral = bool(settings.mistral_api_keys)
+    has_gemini = bool(settings.gemini_api_keys)
+
+    if not has_groq and not has_mistral and not has_gemini:
+        errors.append(
+            "No LLM API keys found. Set at least one of: "
+            "GROQ_API_KEY_1, MISTRAL_API_KEY_1, or GEMINI_API_KEY_1 in .env. "
+            "All AI features (resume analysis, ATS scoring, job matching, etc.) will fail without this."
+        )
+    else:
+        # Individual provider warnings so the developer knows what fallbacks are available
+        if not has_groq:
+            warnings.append("GROQ_API_KEY_1..5 are all empty — Groq provider disabled (Mistral/Gemini will be used as fallback).")
+        if not has_mistral:
+            warnings.append("MISTRAL_API_KEY_1..5 are all empty — Mistral provider disabled.")
+        if not has_gemini:
+            warnings.append("GEMINI_API_KEY_1..5 are all empty — Gemini fallback provider disabled.")
+
+    # --- Apify (optional but needed for job discovery) ---
+    apify = (settings.APIFY_TOKEN or "").strip()
+    if not apify or apify.lower() in ("apify_api_token", ""):
+        warnings.append(
+            "APIFY_TOKEN is not set or still uses the placeholder value. "
+            "Job discovery (LinkedIn / Indeed / Naukri / Glassdoor) will be disabled."
+        )
+
+    # --- Email (optional) ---
+    if not (settings.EMAIL_USERNAME or "").strip():
+        warnings.append(
+            "EMAIL_USERNAME is empty — email features (verification, password reset, application emails) are disabled."
+        )
+
+    # --- Google Sheets (optional) ---
+    if not (settings.GOOGLE_SHEET_ID or "").strip():
+        warnings.append(
+            "GOOGLE_SHEET_ID is empty — Google Sheets job sync is disabled."
+        )
+
+    # --- MongoDB URI sanity check in production ---
+    if settings.APP_ENV not in ("development", "dev", "local"):
+        if "localhost" in settings.MONGODB_URI or "127.0.0.1" in settings.MONGODB_URI:
+            warnings.append(
+                f"MONGODB_URI points to localhost but APP_ENV is '{settings.APP_ENV}'. "
+                "Make sure this is intentional — use MongoDB Atlas URI in production."
+            )
+
+    # --- Emit results ---
+    import structlog
+    log = structlog.get_logger("startup_validator")
+
+    for warning in warnings:
+        log.warning("config_warning", message=warning)
+
+    if errors:
+        error_block = "\n".join(f"  ❌  {e}" for e in errors)
+        raise RuntimeError(
+            f"\n\n{'='*70}\n"
+            f"STARTUP ABORTED — Fix the following .env issues and restart:\n\n"
+            f"{error_block}\n\n"
+            f"{'='*70}\n"
+        )
+
+    log.info(
+        "config_ok",
+        llm_providers=[
+            p for p, ok in [("groq", has_groq), ("mistral", has_mistral), ("gemini", has_gemini)] if ok
+        ],
+        apify_ready=bool(apify and apify.lower() != "apify_api_token"),
+        email_ready=bool((settings.EMAIL_USERNAME or "").strip()),
+        sheets_ready=bool((settings.GOOGLE_SHEET_ID or "").strip()),
+    )

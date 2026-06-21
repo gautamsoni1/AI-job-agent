@@ -7,7 +7,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from app.config import settings
+from app.config import settings, validate_startup_config
 from app.database import connect_db, disconnect_db
 from app.core.exceptions import APIError
 from app.core.middleware import RequestLoggingMiddleware
@@ -19,6 +19,14 @@ logger = structlog.get_logger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Starting AI Job Agent Platform", version="1.0.0", env=settings.APP_ENV)
+
+    # ── Validate .env before anything else ──────────────────────────────
+    # Raises RuntimeError immediately if critical keys are missing/wrong.
+    # The error message tells the developer exactly what to fix in .env
+    # instead of a cryptic crash on the first real request.
+    validate_startup_config()
+    # ────────────────────────────────────────────────────────────────────
+
     await connect_db()
     logger.info("MongoDB connected")
     yield
