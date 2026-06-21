@@ -149,6 +149,34 @@ class JobRepository(BaseRepository):
         cursor = self.collection.find({}, sort=[("created_at", -1)]).skip(skip).limit(limit)
         return await cursor.to_list(length=limit)
     
+    async def find_all_user_job_keys(self, user_id: str) -> set:
+        """
+        Cross-run deduplication ke liye user ke saare existing jobs ke
+        normalized keys return karta hai — title+company+location tuple
+        AND apply_link string, dono forms mein.
+        """
+        cursor = self.collection.find(
+            {"user_id": user_id, "is_deleted": {"$ne": True}},
+            {"title": 1, "company": 1, "location": 1, "apply_link": 1}
+        )
+    
+        docs = await cursor.to_list(length=5000)
+    
+        keys: set = set()
+    
+        for doc in docs:
+            keys.add((
+                (doc.get("title") or "").strip().lower(),
+                (doc.get("company") or "").strip().lower(),
+                (doc.get("location") or "").strip().lower(),
+            ))
+    
+            link = (doc.get("apply_link") or "").strip()
+            if link:
+                keys.add(link)
+    
+        return keys
+    
     async def find_existing_similar(self, user_id: str, title: str, company: str, apply_link: str = "") -> Optional[dict]:
         """Catches duplicates even when apply_link differs or is missing —
         same title + company for the same user counts as the same job."""

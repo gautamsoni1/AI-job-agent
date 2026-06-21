@@ -273,14 +273,22 @@ class PipelineService:
         seen_keys = set()
         saved_jobs = []
 
+        existing_job_keys: set = await self.job_repo.find_all_user_job_keys(user_id)
+        seen_keys.update(existing_job_keys)
+
         for raw_job in raw_jobs:
             if len(saved_jobs) >= max_jobs:
                 break
 
             key = self._job_key(raw_job)
-            if key in seen_keys:
-                continue
 
+            apply_link_raw = (raw_job.get("apply_link") or "").strip()
+            
+            if key in seen_keys or (
+                apply_link_raw and apply_link_raw in seen_keys
+            ):
+                continue
+            
             if not self._looks_relevant(raw_job, resume_skill_set, role_keyword_set):
                 continue
 
@@ -295,6 +303,11 @@ class PipelineService:
                 continue
 
             seen_keys.add(key)
+
+            _link = (raw_job.get("apply_link") or "").strip()
+            if _link:
+                seen_keys.add(_link)
+            
             raw_job.update({
                 "user_id": user_id, "created_at": now, "discovered_at": now,
                 "updated_at": now, "is_saved": False, "is_deleted": False,
