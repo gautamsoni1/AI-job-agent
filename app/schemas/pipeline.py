@@ -15,12 +15,14 @@ class PipelineJobItem(BaseModel):
     source: Optional[str] = None
     scout_report: dict = {}
     match_report: dict = {}
+    matched_target_role: Optional[str] = None
 
 
 class PipelineRunResponse(BaseModel):
     pipeline_id: str
     resume_id: str
     target_role: Optional[str] = None
+    target_roles: list[str] = []
     initial_ats_score: float
     final_ats_score: float
     ats_iterations: int

@@ -10,6 +10,7 @@ class PipelineRunDocument(BaseModel):
     resume_id: str
     final_resume_id: Optional[str] = None
     target_role: Optional[str] = None
+    target_roles: list[str] = []
     job_description_used: Optional[str] = None
     initial_ats_score: float = 0.0
     final_ats_score: float = 0.0

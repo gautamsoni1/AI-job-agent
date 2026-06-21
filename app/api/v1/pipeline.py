@@ -77,7 +77,10 @@ async def _check_pipeline_rate_limit(user_id: str, db: AsyncIOMotorDatabase) -> 
 @router.post("/run", response_model=PipelineRunResponse, status_code=201)
 async def run_pipeline(
     file: UploadFile = File(..., description="Resume file — PDF or DOCX"),
-    target_role: Optional[str] = Form(None),
+    target_role: Optional[str] = Form(
+        None,
+        description="Comma-separated for multiple roles, e.g. 'Python Developer,Backend Engineer,Django Developer'",
+    ),
     job_description: Optional[str] = Form(None),
     locations: Optional[str] = Form(None, description="Comma-separated, e.g. 'Bangalore,Remote'"),
     max_jobs: int = Form(15),
@@ -96,13 +99,16 @@ async def run_pipeline(
 
     file_bytes = await file.read()
     location_list = [loc.strip() for loc in locations.split(",") if loc.strip()] if locations else None
+    # Max 5 roles cap — Apify har role ke liye alag API call karega,
+    # unbounded list quota/cost ko spam kar degi.
+    target_role_list = [r.strip() for r in target_role.split(",") if r.strip()][:5] if target_role else None
 
     service = PipelineService(db)
     result = await service.run_pipeline(
         user=current_user,
         file_bytes=file_bytes,
         filename=file.filename or "resume",
-        target_role=target_role,
+        target_roles=target_role_list,
         job_description=job_description,
         locations=location_list,
         max_jobs=max(1, min(max_jobs, 40)),
@@ -114,16 +120,17 @@ async def run_pipeline(
 async def start_pipeline(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(..., description="Resume file — PDF or DOCX"),
-    target_role: Optional[str] = Form(None),
+    target_role: Optional[str] = Form(
+        None,
+        description="Comma-separated for multiple roles, e.g. 'Python Developer,Backend Engineer,Django Developer'",
+    ),
     job_description: Optional[str] = Form(None),
     locations: Optional[str] = Form(None),
     max_jobs: int = Form(15),
     current_user: dict = Depends(get_verified_user),
     db: AsyncIOMotorDatabase = Depends(get_db),
 ):
-    """Pipeline ko background mein start karta hai aur turant run_id +
-    websocket_url return kar deta hai. Live progress ke liye us URL par
-    connect karo; final result DONE event ke 'data' field mein aayega."""
+    """..."""
 
     # ── Rate limit check (same guard for async start path) ──────────────
     await _check_pipeline_rate_limit(str(current_user["_id"]), db)
@@ -137,6 +144,7 @@ async def start_pipeline(
 
     file_bytes = await file.read()
     location_list = [loc.strip() for loc in locations.split(",") if loc.strip()] if locations else None
+    target_role_list = [r.strip() for r in target_role.split(",") if r.strip()][:5] if target_role else None
     run_id = str(uuid.uuid4())
 
     service = PipelineService(db)
@@ -146,7 +154,7 @@ async def start_pipeline(
         current_user,
         file_bytes,
         file.filename or "resume",
-        target_role,
+        target_role_list,
         job_description,
         location_list,
         max(1, min(max_jobs, 40)),

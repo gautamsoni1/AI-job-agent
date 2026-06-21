@@ -79,7 +79,7 @@ class PipelineService:
         user: dict,
         file_bytes: bytes,
         filename: str,
-        target_role: Optional[str],
+        target_roles: Optional[list[str]],
         job_description: Optional[str],
         locations: Optional[list[str]],
         max_jobs: int,
@@ -133,9 +133,11 @@ class PipelineService:
             await progress_manager.emit(run_id, "RESUME_ANALYZING", "AI resume analysis chal raha hai...", percent=20)
 
         # 2. AI analysis
+        # 2. AI analysis
+        target_roles_label = ", ".join(target_roles) if target_roles else ""
         await self.orchestrator.execute(
             agent_name="resume_agent", task="analyze", user_id=user_id,
-            payload={"resume_text": resume_doc["raw_text"], "target_role": target_role or ""},
+            payload={"resume_text": resume_doc["raw_text"], "target_role": target_roles_label},
         )
 
         if run_id:
@@ -147,7 +149,7 @@ class PipelineService:
         inferred_role = self._infer_role_from_resume(parsed)
         effective_jd = (job_description or "").strip()
         if not effective_jd:
-            role_for_jd = target_role or inferred_role
+            role_for_jd = " / ".join(target_roles) if target_roles else inferred_role
             top_skills = ", ".join(parsed.get("skills_found", [])[:10])
             skills_phrase = top_skills if top_skills else "the candidate's core domain"
             effective_jd = (
@@ -245,30 +247,23 @@ class PipelineService:
             }
         
         await self._save_ats_report(user_id, latest_resume_id, effective_jd, ats_data)
-        # 5. Domain-accurate, deduplicated, experience-matched job discovery
+# 5. Domain-accurate, deduplicated, experience-matched job discovery
         candidate_years = infer_experience_years(resume_doc["raw_text"])
         candidate_level = experience_level_for(candidate_years)
 
-        keywords = self._build_keywords(target_role, inferred_role, parsed)
+        role_keyword_groups = self._build_role_keyword_groups(target_roles, inferred_role, parsed)
         location_list = locations or self._get_user_locations(user)
 
         if run_id:
-            await progress_manager.emit(run_id, "JOB_FETCHING", "Jobs fetch ho rahe hain (LinkedIn, Indeed, Naukri, Glassdoor)...", percent=60)
-
-        apify = ApifyService()
-        # Sirf utna hi fetch karo jitna user ne manga — 1.5x sirf dedup loss ke liye
-        fetch_limit = min(max_jobs * 2, max_jobs + 20)
-        raw_jobs = await apify.fetch_jobs(keywords, location_list, candidate_level, max_results=fetch_limit)
-
-        if run_id:
+            role_count_label = f"{len(role_keyword_groups)} target role(s)" if len(role_keyword_groups) > 1 else "your target role"
             await progress_manager.emit(
-                run_id, "JOB_FETCHED",
-                f"{len(raw_jobs)} raw jobs mile — ab filter/scout/match kar rahe hain...",
-                percent=65,
+                run_id, "JOB_FETCHING",
+                f"Jobs fetch ho rahe hain ({role_count_label}) — LinkedIn, Indeed, Naukri, Glassdoor...",
+                percent=60,
             )
 
+        apify = ApifyService()
         resume_skill_set = {s.lower() for s in parsed.get("skills_found", [])}
-        role_keyword_set = {k.lower() for k in keywords if len(k) > 2}
 
         seen_keys = set()
         saved_jobs = []
@@ -276,98 +271,112 @@ class PipelineService:
         existing_job_keys: set = await self.job_repo.find_all_user_job_keys(user_id)
         seen_keys.update(existing_job_keys)
 
-        for raw_job in raw_jobs:
+        # Har target role ke liye alag Apify search — ek hi combined query
+        # bhejne se distinct roles ek dusre mein dilute ho jaate (e.g.
+        # "Python Developer Backend Engineer Django Developer" ek hi
+        # weird search term ban jaata). Per-role search zyada accurate hai.
+        for role_label, keywords in role_keyword_groups:
             if len(saved_jobs) >= max_jobs:
                 break
 
-            key = self._job_key(raw_job)
-
-            apply_link_raw = (raw_job.get("apply_link") or "").strip()
-            
-            if key in seen_keys or (
-                apply_link_raw and apply_link_raw in seen_keys
-            ):
-                continue
-            
-            if not self._looks_relevant(raw_job, resume_skill_set, role_keyword_set):
-                continue
-
-            if not self._looks_relevant(raw_job, resume_skill_set, role_keyword_set):
-                continue
-
-            if not is_job_suitable_for_candidate(raw_job, candidate_years):
-                continue
-
-            posted_value = raw_job.get("posted_at") or raw_job.get("posted_date")
-            if not is_recently_posted(posted_value, max_age_days=30):
-                continue
-
-            seen_keys.add(key)
-
-            _link = (raw_job.get("apply_link") or "").strip()
-            if _link:
-                seen_keys.add(_link)
-            
-            raw_job.update({
-                "user_id": user_id, "created_at": now, "discovered_at": now,
-                "updated_at": now, "is_saved": False, "is_deleted": False,
-            })
-            raw_job.setdefault("required_skills", [])
-
-            existing_job = await self.job_repo.find_existing_similar(
-                user_id, raw_job.get("title", ""), raw_job.get("company", ""), raw_job.get("apply_link", "")
-            )
-            if existing_job:
-                job_with_id = existing_job
-            else:
-                ids = await self.job_repo.bulk_insert_jobs([raw_job])
-                if not ids:
-                    continue
-                job_with_id = dict(raw_job)
-                job_with_id["_id"] = ids[0]
-
-            job_id_str = str(job_with_id["_id"])
-
-            scout_result = await self.orchestrator.execute(
-                agent_name="job_scout_agent", task="scout", user_id=user_id, payload={"job": job_with_id},
-            )
-            await self.job_repo.update_scout_report(job_id_str, scout_result.data)
-
-            match_result = await self.orchestrator.execute(
-                agent_name="job_matching_agent", task="match", user_id=user_id,
-                payload={"resume_text": current_text, "job": job_with_id},
-            )
-            overall_match = match_result.data.get("overall_match", 0)
-            if overall_match < MIN_OVERALL_MATCH:
-                continue
-
-            await self.job_repo.update_match_score(job_id_str, overall_match, match_result.data)
-            job_with_id.update({
-                "scout_report": scout_result.data,
-                "match_score": overall_match,
-                "match_report": match_result.data,
-            })
-            saved_jobs.append(job_with_id)
+            # Sirf utna hi fetch karo jitna baaki bacha hai — 1.5x sirf dedup loss ke liye
+            remaining = max_jobs - len(saved_jobs)
+            fetch_limit = min(remaining * 2, remaining + 20)
+            raw_jobs = await apify.fetch_jobs(keywords, location_list, candidate_level, max_results=fetch_limit)
 
             if run_id:
-                pct = 65 + int(min(len(saved_jobs) / max(max_jobs, 1), 1.0) * 30)
                 await progress_manager.emit(
-                    run_id, "JOB_MATCHED",
-                    f"{len(saved_jobs)}/{max_jobs} jobs found — latest: {job_with_id.get('title')} @ {job_with_id.get('company')}",
-                    percent=pct,
-                    data={"jobs_found": len(saved_jobs), "max_jobs": max_jobs},
+                    run_id, "JOB_FETCHED",
+                    f"'{role_label}' ke liye {len(raw_jobs)} raw jobs mile — ab filter/scout/match kar rahe hain...",
+                    percent=65,
                 )
 
-            # REPLACE this inline block:
-            try:
-                if settings.GOOGLE_SHEET_ID:
-                    sheets = GoogleSheetsService()
-                    await sheets.sync_job(job_with_id, match_score=overall_match, ats_score=ats_data.get("ats_score", 0))
-            except Exception as e:
-                logger.warning("pipeline_sheets_sync_failed", error=str(e))
-            
-            # WITH this call:
-            await self._sync_to_sheets_safe(job_with_id, match_score=overall_match, ats_score=ats_data.get("ats_score", 0))
+            role_keyword_set = {k.lower() for k in keywords if len(k) > 2}
+
+            for raw_job in raw_jobs:
+                if len(saved_jobs) >= max_jobs:
+                    break
+
+                key = self._job_key(raw_job)
+
+                apply_link_raw = (raw_job.get("apply_link") or "").strip()
+
+                if key in seen_keys or (
+                    apply_link_raw and apply_link_raw in seen_keys
+                ):
+                    continue
+
+                if not self._looks_relevant(raw_job, resume_skill_set, role_keyword_set):
+                    continue
+
+                if not self._looks_relevant(raw_job, resume_skill_set, role_keyword_set):
+                    continue
+
+                if not is_job_suitable_for_candidate(raw_job, candidate_years):
+                    continue
+
+                posted_value = raw_job.get("posted_at") or raw_job.get("posted_date")
+                if not is_recently_posted(posted_value, max_age_days=30):
+                    continue
+
+                seen_keys.add(key)
+
+                _link = (raw_job.get("apply_link") or "").strip()
+                if _link:
+                    seen_keys.add(_link)
+
+                raw_job.update({
+                    "user_id": user_id, "created_at": now, "discovered_at": now,
+                    "updated_at": now, "is_saved": False, "is_deleted": False,
+                })
+                raw_job.setdefault("required_skills", [])
+
+                existing_job = await self.job_repo.find_existing_similar(
+                    user_id, raw_job.get("title", ""), raw_job.get("company", ""), raw_job.get("apply_link", "")
+                )
+                if existing_job:
+                    job_with_id = existing_job
+                else:
+                    ids = await self.job_repo.bulk_insert_jobs([raw_job])
+                    if not ids:
+                        continue
+                    job_with_id = dict(raw_job)
+                    job_with_id["_id"] = ids[0]
+
+                job_id_str = str(job_with_id["_id"])
+
+                scout_result = await self.orchestrator.execute(
+                    agent_name="job_scout_agent", task="scout", user_id=user_id, payload={"job": job_with_id},
+                )
+                await self.job_repo.update_scout_report(job_id_str, scout_result.data)
+
+                match_result = await self.orchestrator.execute(
+                    agent_name="job_matching_agent", task="match", user_id=user_id,
+                    payload={"resume_text": current_text, "job": job_with_id},
+                )
+                overall_match = match_result.data.get("overall_match", 0)
+                if overall_match < MIN_OVERALL_MATCH:
+                    continue
+
+                await self.job_repo.update_match_score(job_id_str, overall_match, match_result.data)
+                job_with_id.update({
+                    "scout_report": scout_result.data,
+                    "match_score": overall_match,
+                    "match_report": match_result.data,
+                    "matched_target_role": role_label,
+                })
+                saved_jobs.append(job_with_id)
+
+                if run_id:
+                    pct = 65 + int(min(len(saved_jobs) / max(max_jobs, 1), 1.0) * 30)
+                    await progress_manager.emit(
+                        run_id, "JOB_MATCHED",
+                        f"{len(saved_jobs)}/{max_jobs} jobs found — latest: {job_with_id.get('title')} @ {job_with_id.get('company')} ('{role_label}')",
+                        percent=pct,
+                        data={"jobs_found": len(saved_jobs), "max_jobs": max_jobs},
+                    )
+
+                await self._sync_to_sheets_safe(job_with_id, match_score=overall_match, ats_score=ats_data.get("ats_score", 0))
 
         saved_jobs.sort(key=lambda j: (week_bucket(j.get("posted_at") or j.get("posted_date")), -j.get("match_score", 0)))
 
@@ -375,12 +384,14 @@ class PipelineService:
             await progress_manager.emit(run_id, "EXPORTING", "Spreadsheet ban raha hai...", percent=97)
 
         # 6. Persist pipeline run + export "before apply" sheet
+        resolved_target_roles = target_roles or [inferred_role]
         pipeline_doc = {
             "user_id": user_id,
             "resume_id": resume_id,
             "final_resume_id": latest_resume_id,
             "final_resume_text": current_text[:6000],
-            "target_role": target_role or inferred_role,
+            "target_role": resolved_target_roles[0],
+            "target_roles": resolved_target_roles,
             "candidate_experience_level": candidate_level,
             "candidate_experience_years": candidate_years,
             "job_description_used": effective_jd[:2000],
@@ -418,7 +429,8 @@ class PipelineService:
         return {
             "pipeline_id": pipeline_id,
             "resume_id": resume_id,
-            "target_role": target_role or inferred_role,
+            "target_role": resolved_target_roles[0],
+            "target_roles": resolved_target_roles,
             "initial_ats_score": initial_ats_score,
             "final_ats_score": ats_data.get("ats_score", 0.0),
             "ats_iterations": iteration,
@@ -678,11 +690,23 @@ class PipelineService:
         return "General Professional Role"
 
     # NAYA (yahi daalo)
-    def _build_keywords(self, target_role: Optional[str], inferred_role: str, parsed: dict) -> list[str]:
-        if target_role and target_role.strip():
-            # User ne bataya hai — sirf wahi lao, kuch aur mat milao
-            return target_role.strip().split()[:8]
+    def _build_role_keyword_groups(
+        self, target_roles: Optional[list[str]], inferred_role: str, parsed: dict
+    ) -> list[tuple[str, list[str]]]:
+        """Har target role ke liye alag (role_label, keywords) pair return
+        karta hai — taaki job discovery loop har role ke liye separate
+        Apify search chala sake instead of ek hi combined/diluted query ke."""
+        if target_roles:
+            groups = [
+                (role.strip(), role.strip().split()[:8])
+                for role in target_roles if role.strip()
+            ]
+            if groups:
+                return groups
         # User ne kuch nahi bataya — resume se infer karo
+        return [(inferred_role, self._build_keywords_from_resume(inferred_role, parsed))]
+
+    def _build_keywords_from_resume(self, inferred_role: str, parsed: dict) -> list[str]:
         base = inferred_role.replace("Professional", "").split()
         skills = parsed.get("skills_found", []) or []
         keywords = list(dict.fromkeys([*base, *skills[:5]]))
@@ -699,16 +723,6 @@ class PipelineService:
             (job.get("location") or "").strip().lower(),
         )
 
-    # def _looks_relevant(self, job: dict, resume_skills: set, role_keywords: set) -> bool:
-    #     if not resume_skills and not role_keywords:
-    #         return True
-    #     text = f"{job.get('title','')} {job.get('description','')[:500]}".lower()
-    #     if any(skill in text for skill in resume_skills):
-    #         return True
-    #     if any(kw in text for kw in role_keywords):
-    #         return True
-    #     return False
-
     def _to_pipeline_job_item(self, job: dict) -> dict:
         scout = job.get("scout_report", {}) or {}
         return {
@@ -724,6 +738,7 @@ class PipelineService:
             "source": job.get("source"),
             "scout_report": scout,
             "match_report": job.get("match_report", {}) or {},
+            "matched_target_role": job.get("matched_target_role"),
         }
 
     async def _save_ats_report(self, user_id: str, resume_id: str, jd: str, ats_data: dict):
@@ -754,7 +769,7 @@ class PipelineService:
     
     async def run_pipeline_tracked(
         self, run_id: str, user: dict, file_bytes: bytes, filename: str,
-        target_role: Optional[str], job_description: Optional[str],
+        target_roles: Optional[list[str]], job_description: Optional[str],
         locations: Optional[list[str]], max_jobs: int,
     ) -> None:
         """BackgroundTasks se call hota hai. run_pipeline() ko wrap karta hai
@@ -763,7 +778,7 @@ class PipelineService:
         try:
             result = await self.run_pipeline(
                 user=user, file_bytes=file_bytes, filename=filename,
-                target_role=target_role, job_description=job_description,
+                target_roles=target_roles, job_description=job_description,
                 locations=locations, max_jobs=max_jobs, run_id=run_id,
             )
             await progress_manager.emit(run_id, "DONE", "Pipeline complete.", percent=100, data=result)
