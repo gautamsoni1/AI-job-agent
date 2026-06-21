@@ -5,8 +5,10 @@ from fastapi import APIRouter, Depends, Query
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.core.dependencies import get_db, get_current_admin
+from app.config import get_settings
 
 router = APIRouter()
+settings = get_settings()
 
 
 @router.get("/stats")
@@ -22,6 +24,11 @@ async def get_platform_stats(
     total_cover_letters = await db["cover_letters"].count_documents({})
     total_ats_reports = await db["ats_reports"].count_documents({})
 
+    # Pipeline run counts — previously not surfaced anywhere in admin stats.
+    total_pipeline_runs = await db["pipeline_runs"].count_documents({})
+    pipeline_runs_jobs_ready = await db["pipeline_runs"].count_documents({"status": "JOBS_READY"})
+    pipeline_runs_applied = await db["pipeline_runs"].count_documents({"status": "APPLIED"})
+
     return {
         "success": True,
         "stats": {
@@ -32,6 +39,18 @@ async def get_platform_stats(
             "total_applications": total_applications,
             "total_cover_letters": total_cover_letters,
             "total_ats_reports": total_ats_reports,
+            "total_pipeline_runs": total_pipeline_runs,
+            "pipeline_runs_jobs_ready": pipeline_runs_jobs_ready,
+            "pipeline_runs_applied": pipeline_runs_applied,
+        },
+        # Apify section shows only what ApifyService/settings already define —
+        # which actors are configured. No new tracking, no call history.
+        "apify": {
+            "linkedin_actor_configured": bool(settings.APIFY_LINKEDIN_ACTOR),
+            "indeed_actor_configured": bool(settings.APIFY_INDEED_ACTOR),
+            "naukri_actor_configured": bool(settings.APIFY_NAUKRI_ACTOR),
+            "glassdoor_actor_configured": bool(settings.APIFY_GLASSDOOR_ACTOR),
+            "token_set": bool(settings.APIFY_TOKEN and settings.APIFY_TOKEN.strip() != "apify_api_token"),
         },
     }
 
@@ -71,3 +90,24 @@ async def list_all_jobs(
         j["_id"] = str(j["_id"])
     total = await db["jobs"].count_documents({})
     return {"success": True, "jobs": jobs, "total": total, "page": page}
+
+
+@router.get("/pipelines")
+async def list_all_pipelines(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    current_admin: dict = Depends(get_current_admin),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """Platform-wide pipeline run list — drill-down behind the stats card.
+    Mirrors the same pagination shape as /users and /jobs above."""
+    skip = (page - 1) * page_size
+    cursor = db["pipeline_runs"].find(
+        {},
+        sort=[("created_at", -1)],
+    ).skip(skip).limit(page_size)
+    runs = await cursor.to_list(length=page_size)
+    for r in runs:
+        r["_id"] = str(r["_id"])
+    total = await db["pipeline_runs"].count_documents({})
+    return {"success": True, "pipelines": runs, "total": total, "page": page}

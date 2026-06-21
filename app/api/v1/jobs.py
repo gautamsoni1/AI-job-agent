@@ -307,11 +307,37 @@ async def _run_job_discovery(db, user_id: str, keywords: list, locations: list, 
         repo = JobRepository(db)
         orchestrator = AIOrchestrator(db)
 
+        # Cross-run dedup: load every key (title+company+location AND
+        # apply_link) this user already has in the DB *once*, before the
+        # loop, instead of issuing a per-job query. Keeps the same O(1)
+        # in-memory lookup approach already used by pipeline_service.py's
+        # discovery loop, applied here too — so re-running /jobs/discover
+        # on a different day no longer reinserts jobs already seen.
+        existing_keys = await repo.find_all_user_job_keys(user_id)
+
         skipped_old = 0
+        skipped_duplicate = 0
         for raw_job in raw_jobs:
             posted_value = raw_job.get("posted_at") or raw_job.get("posted_date")
             if not is_recently_posted(posted_value, max_age_days=max_age_days):
                 skipped_old += 1
+                continue
+
+            apply_link = (raw_job.get("apply_link") or "").strip()
+            title_company_location_key = (
+                (raw_job.get("title") or "").strip().lower(),
+                (raw_job.get("company") or "").strip().lower(),
+                (raw_job.get("location") or "").strip().lower(),
+            )
+
+            # Same dedup signal pipeline_service.py already uses: either an
+            # exact apply_link match, or the same title+company+location
+            # combination, regardless of which run (today's or a past
+            # day's) originally inserted it.
+            if title_company_location_key in existing_keys or (
+                apply_link and apply_link in existing_keys
+            ):
+                skipped_duplicate += 1
                 continue
 
             raw_job["user_id"] = user_id
@@ -328,12 +354,23 @@ async def _run_job_discovery(db, user_id: str, keywords: list, locations: list, 
             raw_job.setdefault("package", "Package not provided")
             raw_job.setdefault("posted_date", parse_flexible_date(posted_value))
 
-            existing = await repo.check_duplicate(user_id, raw_job.get("apply_link", ""))
+            # Belt-and-suspenders: also keep the original DB-level check in
+            # case another concurrent request inserted the same apply_link
+            # between loading existing_keys above and this point.
+            existing = await repo.check_duplicate(user_id, apply_link)
             if existing:
+                skipped_duplicate += 1
                 continue
 
             job_ids = await repo.bulk_insert_jobs([raw_job])
             if job_ids:
+                # Record this job's keys immediately so later items in the
+                # same raw_jobs batch (e.g. duplicate listings from
+                # different sources) are also caught within this one run.
+                existing_keys.add(title_company_location_key)
+                if apply_link:
+                    existing_keys.add(apply_link)
+
                 job_with_id = dict(raw_job)
                 job_with_id["_id"] = job_ids[0]
                 relevance_score = 0.0
@@ -354,11 +391,12 @@ async def _run_job_discovery(db, user_id: str, keywords: list, locations: list, 
         await db["ai_timeline"].insert_one({
             "user_id": user_id,
             "event_type": "JOB_DISCOVERED",
-            "title": f"Discovered {len(raw_jobs) - skipped_old} jobs",
+            "title": f"Discovered {len(raw_jobs) - skipped_old - skipped_duplicate} jobs",
             "description": f"Keywords: {', '.join(keywords)}",
             "metadata": {
-                "count": len(raw_jobs) - skipped_old,
+                "count": len(raw_jobs) - skipped_old - skipped_duplicate,
                 "skipped_old": skipped_old,
+                "skipped_duplicate": skipped_duplicate,
                 "keywords": keywords,
                 "locations": locations,
             },
