@@ -1,6 +1,7 @@
 """
 AI Job Agent Platform — FastAPI Application Factory
 """
+import asyncio
 import structlog
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
@@ -8,12 +9,30 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.config import settings, validate_startup_config
-from app.database import connect_db, disconnect_db
+from app.database import connect_db, disconnect_db, get_database
 from app.core.exceptions import APIError
 from app.core.middleware import RequestLoggingMiddleware
 from app.api.v1.router import api_v1_router
+from app.services.followup_service import FollowUpService
 
 logger = structlog.get_logger(__name__)
+
+FOLLOWUP_CHECK_INTERVAL_SECONDS = 6 * 60 * 60  # har 6 ghante
+
+
+async def _followup_check_loop():
+    """Background loop — applications jo APPLIED status mein 7+ din se
+    padi hain unke liye reminder bhejta hai. Pure asyncio, koi naya
+    dependency nahi. Pehle sleep karta hai taaki dev mein --reload ke
+    har restart par DB hit na ho."""
+    while True:
+        await asyncio.sleep(FOLLOWUP_CHECK_INTERVAL_SECONDS)
+        try:
+            db = get_database()
+            service = FollowUpService(db)
+            await service.run_followup_check()
+        except Exception as e:
+            logger.warning("followup_loop_error", error=str(e))
 
 
 @asynccontextmanager
@@ -29,7 +48,21 @@ async def lifespan(app: FastAPI):
 
     await connect_db()
     logger.info("MongoDB connected")
+
+    # ── Start background follow-up reminder loop ─────────────────────────
+    followup_task = asyncio.create_task(_followup_check_loop())
+    # ────────────────────────────────────────────────────────────────────
+
     yield
+
+    # ── Stop background loop cleanly before disconnecting DB ─────────────
+    followup_task.cancel()
+    try:
+        await followup_task
+    except asyncio.CancelledError:
+        pass
+    # ────────────────────────────────────────────────────────────────────
+
     await disconnect_db()
     logger.info("MongoDB disconnected")
 

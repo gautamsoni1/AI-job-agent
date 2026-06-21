@@ -28,6 +28,7 @@ class ApplicationDocument(BaseModel):
     success_probability: Optional[float] = None
     interview_probability: Optional[float] = None
     applied_at: Optional[datetime] = None
+    follow_up_sent_at: Optional[datetime] = None
     notes: Optional[str] = None
     interview_date: Optional[datetime] = None
     offer_amount: Optional[float] = None

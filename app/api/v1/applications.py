@@ -130,6 +130,23 @@ async def get_stats(
     )
 
 
+@router.post("/follow-up-check")
+async def trigger_follow_up_check(
+    current_user: dict = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """User khud bhi on-demand chala sake — background loop ke alawa.
+    Already-reminded entries dobara notify nahi hoti."""
+    from app.services.followup_service import FollowUpService
+    service = FollowUpService(db)
+    count = await service.run_followup_check_for_user(str(current_user["_id"]))
+    return {
+        "success": True,
+        "reminders_sent": count,
+        "message": f"{count} follow-up reminder(s) created." if count else "No applications need a follow-up right now.",
+    }
+
+
 @router.get("/{app_id}", response_model=ApplicationResponse)
 async def get_application(
     app_id: str,

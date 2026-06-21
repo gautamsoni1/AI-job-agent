@@ -65,6 +65,7 @@ async def _create_indexes():
     await db.job_matches.create_index([("user_id", 1), ("job_id", 1)])
     await db.applications.create_index([("user_id", 1), ("job_id", 1)])
     await db.applications.create_index([("user_id", 1), ("status", 1)])
+    await db.applications.create_index([("status", 1), ("applied_at", 1)])
     await db.ats_reports.create_index([("user_id", 1), ("created_at", -1)])
     await db.cover_letters.create_index([("user_id", 1), ("created_at", -1)])
     await db.career_reports.create_index([("user_id", 1), ("report_type", 1), ("created_at", -1)])

@@ -84,3 +84,34 @@ class ApplicationRepository(BaseRepository):
             "status": {"$in": ["INTERVIEW_SCHEDULED", "OFFERED"]}
         })
         return round((interviews / total) * 100, 2)
+    
+    async def find_needing_followup(self, cutoff_days: int = 7, limit: int = 500) -> list[dict]:
+        """Sab users ke saare APPLIED applications jinhe cutoff_days se zyada
+        ho gaye aur abhi tak reminder nahi gaya. Background loop ke liye."""
+        cutoff = datetime.utcnow() - timedelta(days=cutoff_days)
+        cursor = self.collection.find({
+            "status": "APPLIED",
+            "applied_at": {"$ne": None, "$lte": cutoff},
+            "follow_up_sent_at": {"$exists": False},
+        }).limit(limit)
+        return await cursor.to_list(length=limit)
+
+    async def find_needing_followup_for_user(self, user_id: str, cutoff_days: int = 7) -> list[dict]:
+        """Same as above but sirf ek user ke liye — manual trigger endpoint ke liye."""
+        cutoff = datetime.utcnow() - timedelta(days=cutoff_days)
+        cursor = self.collection.find({
+            "user_id": user_id,
+            "status": "APPLIED",
+            "applied_at": {"$ne": None, "$lte": cutoff},
+            "follow_up_sent_at": {"$exists": False},
+        })
+        return await cursor.to_list(length=200)
+
+    async def mark_followup_sent(self, app_id: str) -> bool:
+        if not ObjectId.is_valid(app_id):
+            return False
+        result = await self.collection.update_one(
+            {"_id": ObjectId(app_id)},
+            {"$set": {"follow_up_sent_at": datetime.utcnow()}}
+        )
+        return result.modified_count > 0

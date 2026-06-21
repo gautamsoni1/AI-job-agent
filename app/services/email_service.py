@@ -76,6 +76,17 @@ class EmailService:
         </body></html>
         """
         return await self._send(email, f"Application tracked: {role} at {company}", html)
+    
+    async def send_followup_reminder_email(self, email: str, first_name: str, company: str, role: str, days_since: int) -> bool:
+        html = f"""
+        <html><body>
+        <h2>Time to follow up</h2>
+        <p>Hi {first_name}, it's been <strong>{days_since} days</strong> since you applied for
+        <strong>{role}</strong> at <strong>{company}</strong> with no status update yet.</p>
+        <p>A short, polite follow-up email to the recruiter often helps you stand out.</p>
+        </body></html>
+        """
+        return await self._send(email, f"Follow up reminder: {role} at {company}", html)
 
     async def send_job_match_notification(self, email: str, first_name: str, job_count: int) -> bool:
         html = f"""
