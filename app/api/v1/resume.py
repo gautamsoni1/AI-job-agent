@@ -1,9 +1,8 @@
 """
 Resume API Endpoints — Upload, Parse, Analyze, Optimize, Download, Preview
 """
-from mistralai_azure import Optional
+from typing import Optional
 
-from app.repositories.ats_repo import ATSRepository
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, UploadFile, File, BackgroundTasks
 from fastapi.responses import FileResponse
@@ -11,6 +10,7 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.core.dependencies import get_db, get_current_user
 from app.core.exceptions import NotFoundError, ResumeParseError, ValidationError
+from app.repositories.ats_repo import ATSRepository
 from app.repositories.resume_repo import ResumeRepository
 from app.repositories.job_repo import JobRepository
 from app.services.storage_service import StorageService
@@ -18,7 +18,6 @@ from app.services.resume_parser_service import ResumeParserService
 from app.services.resume_generator_service import ResumeGeneratorService
 from app.schemas.resume import ResumeUploadResponse, ResumeListItem, ResumeAnalysisResponse, ResumeOptimizeRequest, ResumeOptimizeResponse
 from app.ai.orchestrator import AIOrchestrator
-from app.database import get_database
 
 router = APIRouter()
 
@@ -216,8 +215,8 @@ async def delete_resume(
 @router.post("/{resume_id}/analyze", response_model=ResumeAnalysisResponse)
 async def analyze_resume(
     resume_id: str,
+    background_tasks: BackgroundTasks,
     target_role: str = "",
-    background_tasks: BackgroundTasks = BackgroundTasks(),
     current_user: dict = Depends(get_current_user),
     db: AsyncIOMotorDatabase = Depends(get_db),
 ):
@@ -277,9 +276,20 @@ async def optimize_resume(
             job_description = _job_to_description(job)
             target_role = target_role or job.get("title")
     if not job_description.strip():
-        raise ValidationError("No job found for this user. Add a job first or provide job_description.")
+        job_description = _build_generic_job_description(
+            {"skills_found": resume.get("skills_extracted", [])},
+            target_role,
+        )
 
     orchestrator = AIOrchestrator(db)
+    baseline_ats = await _score_optimized_resume(
+        orchestrator,
+        str(current_user["_id"]),
+        resume.get("raw_text", ""),
+        job_description,
+    )
+    baseline_score = float(baseline_ats.get("ats_score", 0) or 0)
+
     result = await orchestrator.execute(
         agent_name="resume_agent",
         task="rewrite",
@@ -289,47 +299,71 @@ async def optimize_resume(
     if not result.success:
         raise ValidationError(f"Resume optimization failed: {result.error or 'AI service error'}")
 
-    optimized_data = _build_optimized_resume_data(resume, result.data)
-    optimized_text = _resume_data_to_text(optimized_data)
-    ats_result = await _score_optimized_resume(
+    candidate_data = _build_optimized_resume_data(resume, result.data)
+    candidate_text = _resume_data_to_text(candidate_data)
+    candidate_ats = await _score_optimized_resume(
         orchestrator,
         str(current_user["_id"]),
-        optimized_text,
+        candidate_text,
         job_description,
     )
-    ats_target_score = 90
-    for _ in range(3):
-        if ats_result.get("ats_score", 0) >= ats_target_score:
+    ats_target_score = 95
+    best_result = result
+    best_data = candidate_data
+    best_text = candidate_text
+    best_ats = candidate_ats
+    best_score = float(candidate_ats.get("ats_score", 0) or 0)
+
+    for _ in range(4):
+        if best_score >= ats_target_score:
             break
         retry_result = await orchestrator.execute(
             agent_name="resume_agent",
             task="rewrite",
             user_id=str(current_user["_id"]),
             payload={
-                "resume_text": _repair_resume_context(resume.get("raw_text", ""), optimized_text),
-                "job_description": _job_description_with_ats_feedback(job_description, ats_result),
+                "resume_text": _repair_resume_context(resume.get("raw_text", ""), best_text),
+                "job_description": _job_description_with_ats_feedback(job_description, best_ats),
             },
         )
         if retry_result.success:
-            result = retry_result
-            optimized_data = _build_optimized_resume_data(resume, result.data)
-            optimized_text = _resume_data_to_text(optimized_data)
-            ats_result = await _score_optimized_resume(
+            retry_data = _build_optimized_resume_data(resume, retry_result.data)
+            retry_text = _resume_data_to_text(retry_data)
+            retry_ats = await _score_optimized_resume(
                 orchestrator,
                 str(current_user["_id"]),
-                optimized_text,
+                retry_text,
                 job_description,
             )
+            retry_score = float(retry_ats.get("ats_score", 0) or 0)
+            # Never let a later repair overwrite a stronger earlier draft.
+            if retry_score > best_score:
+                best_result = retry_result
+                best_data = retry_data
+                best_text = retry_text
+                best_ats = retry_ats
+                best_score = retry_score
         else:
             break
 
-    meets_ats_target = ats_result.get("ats_score", 0) >= ats_target_score
+    if best_score <= baseline_score:
+        raise ValidationError(
+            f"No safe ATS improvement was produced (current {baseline_score:.0f}, best draft {best_score:.0f}). "
+            "Your current resume was kept active. Add a specific job description or more truthful achievements and try again."
+        )
+
+    result = best_result
+    optimized_data = best_data
+    optimized_text = best_text
+    ats_result = best_ats
+
+    meets_ats_target = best_score >= ats_target_score
     ats_quality_warning = None
     if not meets_ats_target:
         ats_quality_warning = {
             "message": "Resume optimized, but it did not reach the strict ATS target without adding unverified content.",
             "required_score": ats_target_score,
-            "projected_ats_score": ats_result.get("ats_score", 0.0),
+            "projected_ats_score": best_score,
             "remaining_issues": ats_result.get("formatting_issues", []),
             "missing_keywords": ats_result.get("missing_keywords", []),
             "next_step": "Add more truthful achievements, metrics, project details, contact details, and job-specific evidence to the source resume.",
@@ -356,6 +390,7 @@ async def optimize_resume(
             "education": optimized_data.get("education", []),
             "projects": optimized_data.get("projects", []),
             "skills": optimized_data.get("skills", []),
+            "certifications": optimized_data.get("certifications", []),
         },
         "skills_extracted": result.data.get("rewritten_skills", []),
         "is_active": False,
@@ -366,6 +401,31 @@ async def optimize_resume(
         "updated_at": datetime.now(timezone.utc),
     }
     new_id = await repo.insert(new_resume_doc)
+    # The recreated resume becomes the user's current pipeline resume only
+    # after it has been generated and ATS-checked successfully.
+    await repo.set_active(str(current_user["_id"]), new_id)
+
+    ats_repo = ATSRepository(db)
+    await ats_repo.insert({
+        "user_id": str(current_user["_id"]),
+        "resume_id": new_id,
+        "job_description_snippet": job_description[:200],
+        "ats_score": ats_result.get("ats_score", 0.0),
+        "keyword_coverage": ats_result.get("keyword_coverage", {}),
+        "missing_keywords": ats_result.get("missing_keywords", []),
+        "section_analysis": ats_result.get("section_analysis", {}),
+        "formatting_issues": ats_result.get("formatting_issues", []),
+        "skill_relevance": ats_result.get("skill_relevance", 0.0),
+        "industry_alignment": ats_result.get("industry_alignment", 0.0),
+        "improvement_plan": ats_result.get("improvement_plan", []),
+        "predicted_pass_rate": ats_result.get("predicted_pass_rate", 0.0),
+        "full_report": ats_result,
+        "created_at": datetime.now(timezone.utc),
+    })
+    await db["users"].update_one(
+        {"_id": current_user["_id"]},
+        {"$set": {"latest_ats_score": ats_result.get("ats_score", 0.0)}},
+    )
     root_resume_id = resume.get("parent_resume_id") or resume_id
     await repo.save_version({
         "resume_id": new_id,
@@ -417,7 +477,9 @@ async def optimize_resume(
             "keywords_added": result.data.get("keywords_added", []),
             "remaining_risks": result.data.get("remaining_risks", []),
             "ats_target_score": ats_target_score,
+            "original_ats_score": baseline_score,
             "projected_ats_score": ats_result.get("ats_score", 0.0),
+            "verified_score_improvement": round(best_score - baseline_score, 2),
             "predicted_pass_rate": ats_result.get("predicted_pass_rate", 0.0),
             "missing_keywords_after_optimization": ats_result.get("missing_keywords", []),
             "quality_audit": result.data.get("quality_audit", {}),
@@ -521,9 +583,6 @@ async def preview_resume(
         )
 
     # Need to generate PDF from the optimized resume data stored in the doc
-    raw_text = resume.get("raw_text", "")
-    parsed_sections = resume.get("parsed_sections", {}) or {}
-
     # Build resume_data dict for the template — reuse _build_preview_data
     resume_data = _build_preview_resume_data(resume)
 
@@ -604,16 +663,23 @@ def _build_preview_resume_data(resume: dict) -> dict:
 
 def _build_optimized_resume_data(original_resume: dict, ai_data: dict) -> dict:
     raw_text = original_resume.get("raw_text", "")
-    contact = ai_data.get("contact") or _extract_contact_from_text(raw_text)
+    original_sections = original_resume.get("parsed_sections", {}) or {}
+    extracted_contact = _extract_contact_from_text(raw_text)
+    ai_contact = ai_data.get("contact", {}) or {}
+    # Empty AI fields must not erase valid contact details from the upload.
+    contact = {
+        key: ai_contact.get(key) or extracted_contact.get(key, "")
+        for key in ("email", "phone", "linkedin", "location")
+    }
     data = {
         "full_name": ai_data.get("full_name") or _guess_name(raw_text),
         "contact": contact,
-        "summary": ai_data.get("rewritten_summary", ""),
-        "experience": ai_data.get("rewritten_experience", []) or [],
-        "education": ai_data.get("education", []) or [],
-        "projects": ai_data.get("projects", []) or [],
+        "summary": ai_data.get("rewritten_summary") or original_sections.get("summary", ""),
+        "experience": ai_data.get("rewritten_experience") or original_sections.get("experience", []) or [],
+        "education": ai_data.get("education") or original_sections.get("education", []) or [],
+        "projects": ai_data.get("projects") or original_sections.get("projects", []) or [],
         "skills": ai_data.get("rewritten_skills", []) or original_resume.get("skills_extracted", []),
-        "certifications": ai_data.get("certifications", []) or [],
+        "certifications": ai_data.get("certifications") or original_sections.get("certifications", []) or [],
     }
     return _polish_resume_data(data)
 
@@ -748,6 +814,13 @@ def _resume_data_to_text(data: dict) -> str:
         lines.extend(["", "EDUCATION"])
         for edu in data["education"]:
             lines.append(" - ".join(filter(None, [edu.get("degree", ""), edu.get("institution", ""), edu.get("year", "")])))
+    if data.get("certifications"):
+        lines.extend(["", "CERTIFICATIONS"])
+        for certification in data["certifications"]:
+            if isinstance(certification, dict):
+                lines.append(" - ".join(str(value) for value in certification.values() if value))
+            else:
+                lines.append(str(certification))
     return "\n".join(line for line in lines if line is not None).strip()
 
 

@@ -1,6 +1,7 @@
 """
 Application Configuration — pydantic-settings based
 """
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from functools import lru_cache
 
@@ -14,7 +15,7 @@ class Settings(BaseSettings):
     APP_NAME: str = "AI Job Agent"
     APP_ENV: str = "development"
     APP_HOST: str = "0.0.0.0"
-    APP_PORT: int = 8000
+    APP_PORT: int = 8001
     LOG_LEVEL: str = "INFO"
     FRONTEND_URL: str = "http://localhost:3000"
     ALGORITHM: str = "HS256"
@@ -162,6 +163,17 @@ class Settings(BaseSettings):
     # ==========================================
     DEBUG: bool = True
     AUTO_RELOAD: bool = True
+
+    @field_validator("DEBUG", "AUTO_RELOAD", "CACHE_ENABLED", "LOG_JSON_FORMAT", mode="before")
+    @classmethod
+    def parse_boolish_settings(cls, value):
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"true", "1", "yes", "y", "on", "debug", "development", "dev", "local"}:
+                return True
+            if normalized in {"false", "0", "no", "n", "off", "release", "production", "prod"}:
+                return False
+        return value
 
     # ------------------------------------------------------------------
     # COMPUTED PROPERTIES

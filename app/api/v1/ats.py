@@ -36,7 +36,8 @@ async def score_resume(
             job = jobs[0]
             job_description = _job_to_description(job)
     if not job_description.strip():
-        raise ValidationError("No job found for this user. Add a job first or provide job_description.")
+        skills = resume.get("skills_extracted", []) or []
+        job_description = _generic_job_description(skills)
 
     orchestrator = AIOrchestrator(db)
     result = await orchestrator.execute(
@@ -211,3 +212,13 @@ def _job_to_description(job: dict) -> str:
     if job.get("nice_to_have_skills"):
         parts.append("Nice to have: " + ", ".join(str(item) for item in job["nice_to_have_skills"]))
     return "\n".join(part for part in parts if part)
+
+
+def _generic_job_description(skills: list[str]) -> str:
+    skills_text = ", ".join(str(skill) for skill in skills[:15]) or "the candidate's core professional skills"
+    return (
+        "General ATS readiness check for a role aligned with the candidate's experience. "
+        f"Expected relevant skills include {skills_text}. Evaluate contact information, "
+        "standard sections, readable ATS-safe structure, measurable achievements, clear "
+        "experience bullets, grammar, keyword relevance, and absence of hiring red flags."
+    )

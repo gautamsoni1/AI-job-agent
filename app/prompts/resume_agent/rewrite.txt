@@ -17,9 +17,11 @@ Rewrite this resume to maximize alignment with the target job description while 
 5. Reorder or re-emphasize skills to match job priorities. Use clean skill names, no duplicates, no inflated buzzwords, and include exact JD keywords only when truthful.
 6. Fix ATS blockers and external checker issues: missing contact details, missing standard section headings, weak summary, low content depth, missing measurable impact, repeated wording, grammar/spelling mistakes, inconsistent bullet punctuation, unclear dates, keyword gaps, irrelevant skills, HR red flags, and discrimination-sensitive personal details.
 7. Use the exact standard section strategy expected by common ATS/checkers: Contact, Professional Summary, Skills, Work Experience, Projects if useful, Education, Certifications if present.
-8. Target a strong external-checker result: content quality 80+, ATS essentials 80+, HR red flags 80+, tailoring 80+, and overall ATS/recruiter score 85+ where truthful evidence supports it. Do not claim this score in the resume text.
+8. Target internal ATS 95 and a strong external-checker result: content quality 80+, ATS essentials 80+, HR red flags 80+, tailoring 80+, and overall ATS/recruiter score 80+ where truthful evidence supports it. Do not claim these scores in the resume text.
 9. Before returning JSON, self-audit the rewrite against Enhancv/Jobscan/ResumeWorded-style checks: contact completeness, section completeness, quantified impact, repetition, spelling/grammar, bullet consistency, seniority alignment, tailoring, and parse safety. Revise internally until no obvious issue remains.
 10. List every concrete change you made so the user understands what changed and why.
+11. Treat every issue in any supplied ATS OPTIMIZATION FEEDBACK as a mandatory repair item. Fix each issue in the returned content, then list any issue that cannot truthfully be fixed under remaining_risks.
+12. Preserve every truthful original fact and section. Never drop contact fields, education, projects, certifications, dates, employers, or useful experience merely because the rewrite is targeted.
 
 Hard output rules:
 - No tables, columns, icons, emojis, headshots, charts, text boxes, or decorative symbols.
@@ -51,6 +53,7 @@ Return a JSON object with EXACTLY this structure and nothing else:
   "rewritten_skills": ["<skill1>", "<skill2>", "..."],
   "education": [{"degree": "<degree>", "institution": "<institution>", "year": "<year>"}],
   "projects": [{"name": "<project name>", "description": "<1-2 line optimized description>", "technologies": ["<tech>"]}],
+  "certifications": ["<certification from original resume>"],
   "changes_made": ["<specific change 1>", "<specific change 2>", "..."],
   "improvement_score": <0-100 float, expected ATS/recruiter improvement>,
   "keywords_added": ["<keyword1>", "..."],

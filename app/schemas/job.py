@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from datetime import datetime
 from typing import Optional
 
@@ -40,6 +40,10 @@ class JobResponse(BaseModel):
     package: str
     company_logo: str
     scout_report: dict
+    match_score: float = 0
+    match_report: dict = Field(default_factory=dict)
+    ai_score: float = 0
+    recency_label: str = ""
     discovered_at: datetime
 
 

@@ -37,6 +37,8 @@ HOW IT WORKS
 import asyncio
 import json
 import itertools
+import re
+import time
 from typing import Optional
 
 import structlog
@@ -45,6 +47,10 @@ from app.config import get_settings
 
 logger = structlog.get_logger()
 settings = get_settings()
+
+
+class _ProviderQuotaError(RuntimeError):
+    """Signals that the current provider should be skipped immediately."""
 
 
 class _KeyRotator:
@@ -74,6 +80,12 @@ class GroqClient:
     provider-level fallback. Public interface intentionally mirrors the
     original single-provider GroqClient so no caller needs to change.
     """
+
+    # Shared across instances because some API routes create a client per
+    # request. This prevents every request from hammering a provider whose
+    # keys have just been proven quota-exhausted.
+    _provider_cooldowns: dict[str, float] = {}
+    _quota_cooldown_seconds = 3600
 
     def __init__(self):
         self._max_retries = {
@@ -133,13 +145,22 @@ class GroqClient:
         last_error: Optional[Exception] = None
 
         for provider in self.provider_chain:
+            if self._provider_cooldowns.get(provider, 0) > time.monotonic():
+                logger.info("llm_provider_cooldown_skip", provider=provider)
+                continue
             try:
                 return await self._complete_with_provider(
                     provider, system_prompt, user_prompt, temperature, max_tokens, json_mode
                 )
             except Exception as e:
                 last_error = e
-                logger.warning(
+                rate_limited = self._is_rate_limit_error(e)
+                if rate_limited:
+                    self._provider_cooldowns[provider] = (
+                        time.monotonic() + self._quota_cooldown_seconds
+                    )
+                log_method = logger.info if rate_limited else logger.warning
+                log_method(
                     "llm_provider_exhausted",
                     provider=provider,
                     error=str(e),
@@ -203,20 +224,23 @@ class GroqClient:
                     except Exception as e:
                         last_error = e
                         rate_limited = self._is_rate_limit_error(e)
-                        logger.warning(
-                            "llm_call_failed",
-                            provider=provider,
-                            model=model,
-                            key_index=key_index + 1,
-                            attempt=attempt + 1,
-                            error=str(e),
-                            rate_limited=rate_limited,
+                        log_method = logger.info if rate_limited else logger.warning
+                        log_method(
+                            "llm_call_failed", provider=provider, model=model,
+                            key_index=key_index + 1, attempt=attempt + 1,
+                            error=str(e), rate_limited=rate_limited,
                         )
                         # Rate-limit / quota errors won't resolve in a few
                         # seconds (the provider itself usually says "try
                         # again in Xm") — don't waste time retrying the SAME
                         # key, move on to the next key/model immediately.
                         if rate_limited:
+                            # Provider free-tier quotas are commonly shared by
+                            # all keys in the same account/project. Switch to
+                            # Mistral/Gemini now instead of producing one Groq
+                            # warning per configured key.
+                            raise _ProviderQuotaError(str(e)) from e
+                        if not self._is_retryable_error(e):
                             break
                         if attempt < max_retries - 1:
                             await asyncio.sleep(2 ** attempt)
@@ -225,8 +249,41 @@ class GroqClient:
         raise RuntimeError(f"Provider '{provider}' failed on all {num_keys} key(s): {last_error}")
 
     def _is_rate_limit_error(self, e: Exception) -> bool:
+        """Recognise quota errors emitted by all supported provider SDKs."""
+        if getattr(e, "status_code", None) == 429:
+            return True
+
+        response = getattr(e, "response", None)
+        if getattr(response, "status_code", None) == 429:
+            return True
+
         text = str(e).lower()
-        return "429" in text or "rate_limit" in text or "rate limit" in text
+        markers = (
+            "rate_limit", "rate limit", "ratelimit", "too many requests",
+            "quota exceeded", "quota_exceeded", "resource exhausted",
+            "resource_exhausted", "tokens per minute", "requests per minute",
+            "requests per day", "daily limit", "billing quota",
+            "limit reached", "insufficient_quota", "insufficient quota",
+        )
+        if any(marker in text for marker in markers):
+            return True
+
+        return bool(re.search(
+            r"\b(?:tpm|rpm|rpd|tpd)\b.*\b(?:limit|exceed|quota)", text
+        ))
+
+    def _is_retryable_error(self, e: Exception) -> bool:
+        """Retry only transient transport/server failures on the same model."""
+        status_code = getattr(e, "status_code", None)
+        response = getattr(e, "response", None)
+        status_code = status_code or getattr(response, "status_code", None)
+        if isinstance(status_code, int):
+            return status_code >= 500 or status_code in (408, 409)
+        text = str(e).lower()
+        return any(marker in text for marker in (
+            "timeout", "timed out", "connection reset", "connection error",
+            "temporarily unavailable", "service unavailable", "internal server error",
+        ))
     async def _call_provider(
         self,
         provider: str,

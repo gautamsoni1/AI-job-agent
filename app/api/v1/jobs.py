@@ -232,6 +232,9 @@ def _to_job_response(j: dict) -> dict:
     j["salary_min"] = _display_value(j.get("salary_min"), "Salary min not provided")
     j["salary_max"] = _display_value(j.get("salary_max"), "Salary max not provided")
     j.setdefault("scout_report", {})
+    j.setdefault("match_score", j.get("match_report", {}).get("overall_match", 0) if isinstance(j.get("match_report"), dict) else 0)
+    j.setdefault("match_report", {})
+    j.setdefault("ai_score", j.get("scout_report", {}).get("relevance_score", 0) if isinstance(j.get("scout_report"), dict) else 0)
     j.setdefault("discovered_at", j.get("created_at") or j.get("fetched_at") or datetime.utcnow())
     j["posted_date"] = _display_value(j.get("posted_date") or j.get("posted_at"), "Posted date not provided")
     for key in ("raw_data", "fetched_at"):

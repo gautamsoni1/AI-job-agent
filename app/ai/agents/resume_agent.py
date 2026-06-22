@@ -36,8 +36,10 @@ class ResumeAgent(BaseAgent):
         prompt = self._render_prompt(
             template,
             user_memory=memory.to_prompt_context(),
-            resume_text=resume_text[:6000],
-            job_description=job_description[:3000],
+            # Repair passes contain both original facts and the current draft;
+            # truncating at 6k cut off the draft and made later iterations worse.
+            resume_text=resume_text[:14000],
+            job_description=job_description[:6000],
         )
         system_prompt = (
             "You are a Senior Resume Writer specializing in ATS-optimized, achievement-driven rewrites. "
@@ -117,6 +119,7 @@ class ResumeAgent(BaseAgent):
             "rewritten_skills": result.get("rewritten_skills", []) or [],
             "education": result.get("education", []) or [],
             "projects": result.get("projects", []) or [],
+            "certifications": result.get("certifications", []) or [],
             "changes_made": result.get("changes_made", []) or [],
             "improvement_score": float(result.get("improvement_score", 0) or 0),
             "keywords_added": result.get("keywords_added", []) or [],
