@@ -1,9 +1,9 @@
 """
 Resume API Endpoints — Upload, Parse, Analyze, Optimize, Download, Preview
 """
-from typing import Optional
-
 from datetime import datetime, timezone
+from hashlib import sha256
+from typing import Optional
 from fastapi import APIRouter, Depends, UploadFile, File, BackgroundTasks
 from fastapi.responses import FileResponse
 from motor.motor_asyncio import AsyncIOMotorDatabase
@@ -52,6 +52,7 @@ async def upload_resume(
     repo = ResumeRepository(db)
     existing = await repo.find_by_user(str(current_user["_id"]))
     version_number = len(existing) + 1
+    parsed_hash = parsed.get("content_hash")
 
     resume_doc = {
         "user_id": str(current_user["_id"]),
@@ -60,6 +61,7 @@ async def upload_resume(
         "file_type": file_meta["file_type"],
         "file_size": file_meta["size_bytes"],
         "raw_text": parsed.get("raw_text", ""),
+        "content_hash": parsed_hash,
         "parsed_sections": parsed.get("sections", {}),
         "skills_extracted": parsed.get("skills_found", []),
         "experience_years": None,
@@ -87,6 +89,7 @@ async def upload_resume(
         "file_path": file_meta["file_path"],
         "file_type": file_meta["file_type"],
         "raw_text": parsed.get("raw_text", ""),
+        "content_hash": parsed_hash,
         "parsed_sections": parsed.get("sections", {}),
         "skills_extracted": parsed.get("skills_found", []),
         "source": "upload",
@@ -102,18 +105,30 @@ async def upload_resume(
             {"$addToSet": {"skills": {"$each": parsed["skills_found"]}}}
         )
 
-    # NEW: immediate baseline ATS score so the user sees it right after upload
-    generic_jd = _build_generic_job_description(parsed, (current_user.get("preferred_roles") or [None])[0])
-    orchestrator = AIOrchestrator(db)
-    ats_result = await orchestrator.execute(
-        agent_name="ats_agent",
-        task="score",
-        user_id=str(current_user["_id"]),
-        payload={"resume_text": parsed.get("raw_text", ""), "job_description": generic_jd},
-    )
-    ats_data = ats_result.data if ats_result.success else {}
+    ats_data = {}
     ats_report_id = None
-    if ats_result.success:
+    generic_jd = _build_generic_job_description(parsed, (current_user.get("preferred_roles") or [None])[0])
+    previous_report = await _find_matching_generated_report(
+        db,
+        str(current_user["_id"]),
+        parsed_hash,
+        parsed.get("raw_text", ""),
+    )
+    should_save_ats_report = False
+    if previous_report:
+        ats_data = previous_report.get("full_report") or previous_report
+        should_save_ats_report = True
+    else:
+        orchestrator = AIOrchestrator(db)
+        ats_result = await orchestrator.execute(
+            agent_name="ats_agent",
+            task="score",
+            user_id=str(current_user["_id"]),
+            payload={"resume_text": parsed.get("raw_text", ""), "job_description": generic_jd},
+        )
+        ats_data = ats_result.data if ats_result.success else {}
+        should_save_ats_report = ats_result.success
+    if should_save_ats_report:
         ats_repo = ATSRepository(db)
         ats_report_id = await ats_repo.insert({
             "user_id": str(current_user["_id"]),
@@ -129,6 +144,7 @@ async def upload_resume(
             "improvement_plan": ats_data.get("improvement_plan", []),
             "predicted_pass_rate": ats_data.get("predicted_pass_rate", 0.0),
             "full_report": ats_data,
+            "content_hash": parsed_hash,
             "created_at": datetime.now(timezone.utc),
         })
         await db["users"].update_one(
@@ -266,7 +282,7 @@ async def optimize_resume(
     if not resume or resume.get("user_id") != str(current_user["_id"]):
         raise NotFoundError("Resume", resume_id)
 
-    job_description = body.job_description or ""
+    job_description = _sanitize_job_description(body.job_description or "")
     target_role = body.target_role
     if not job_description.strip():
         job_repo = JobRepository(db)
@@ -279,6 +295,13 @@ async def optimize_resume(
         job_description = _build_generic_job_description(
             {"skills_found": resume.get("skills_extracted", [])},
             target_role,
+        )
+    repair_focus = (body.repair_focus or "").strip().lower()
+    repair_job_description = job_description
+    if repair_focus == "grammar_repetition":
+        repair_job_description = _job_description_with_mistake_repair_focus(
+            job_description,
+            body.current_issues,
         )
 
     orchestrator = AIOrchestrator(db)
@@ -294,7 +317,7 @@ async def optimize_resume(
         agent_name="resume_agent",
         task="rewrite",
         user_id=str(current_user["_id"]),
-        payload={"resume_text": resume.get("raw_text", ""), "job_description": job_description},
+        payload={"resume_text": resume.get("raw_text", ""), "job_description": repair_job_description},
     )
     if not result.success:
         raise ValidationError(f"Resume optimization failed: {result.error or 'AI service error'}")
@@ -308,14 +331,15 @@ async def optimize_resume(
         job_description,
     )
     ats_target_score = 95
+    minimum_quality_score = 80
     best_result = result
     best_data = candidate_data
     best_text = candidate_text
     best_ats = candidate_ats
     best_score = float(candidate_ats.get("ats_score", 0) or 0)
 
-    for _ in range(4):
-        if best_score >= ats_target_score:
+    for _ in range(6):
+        if _resume_quality_ready(best_ats, best_result.data, minimum_quality_score, repair_focus):
             break
         retry_result = await orchestrator.execute(
             agent_name="resume_agent",
@@ -323,7 +347,11 @@ async def optimize_resume(
             user_id=str(current_user["_id"]),
             payload={
                 "resume_text": _repair_resume_context(resume.get("raw_text", ""), best_text),
-                "job_description": _job_description_with_ats_feedback(job_description, best_ats),
+                "job_description": (
+                    _job_description_with_mistake_repair_focus(job_description, body.current_issues, best_ats)
+                    if repair_focus == "grammar_repetition"
+                    else _job_description_with_ats_feedback(job_description, best_ats)
+                ),
             },
         )
         if retry_result.success:
@@ -346,44 +374,66 @@ async def optimize_resume(
         else:
             break
 
-    if best_score <= baseline_score:
+    if best_score <= baseline_score and repair_focus != "grammar_repetition":
         raise ValidationError(
             f"No safe ATS improvement was produced (current {baseline_score:.0f}, best draft {best_score:.0f}). "
             "Your current resume was kept active. Add a specific job description or more truthful achievements and try again."
         )
 
     result = best_result
-    optimized_data = best_data
-    optimized_text = best_text
+    optimized_data = _polish_resume_data(best_data)
+    optimized_text = _resume_data_to_text(optimized_data)
+    optimized_hash = _content_hash(optimized_text)
     ats_result = best_ats
+    repair_quality_warning = None
+    if repair_focus == "grammar_repetition":
+        ats_result = _clean_repair_mode_ats_result(ats_result)
+        best_score = float(ats_result.get("ats_score", best_score) or best_score)
+        unresolved_text = " ".join(str(issue).lower() for issue in ats_result.get("formatting_issues", []))
+        if any(term in unresolved_text for term in ("grammar", "spelling", "repeated", "repetition", "weak phrasing")):
+            repair_quality_warning = {
+                "message": "Resume was repaired with the best safe draft, but a checker may still flag wording that needs more truthful source detail.",
+                "remaining_issues": ats_result.get("formatting_issues", []),
+            }
 
-    meets_ats_target = best_score >= ats_target_score
+    meets_ats_target = _resume_quality_ready(ats_result, result.data, minimum_quality_score, repair_focus)
     ats_quality_warning = None
     if not meets_ats_target:
         ats_quality_warning = {
             "message": "Resume optimized, but it did not reach the strict ATS target without adding unverified content.",
             "required_score": ats_target_score,
+            "minimum_quality_score": minimum_quality_score,
             "projected_ats_score": best_score,
             "remaining_issues": ats_result.get("formatting_issues", []),
             "missing_keywords": ats_result.get("missing_keywords", []),
             "next_step": "Add more truthful achievements, metrics, project details, contact details, and job-specific evidence to the source resume.",
         }
+    if repair_quality_warning:
+        ats_quality_warning = repair_quality_warning
 
     generator = ResumeGeneratorService()
-    generated_file_path = await generator.generate_docx(optimized_data, str(current_user["_id"]))
-    generated_file_size = _safe_file_size(generated_file_path)
+    generated_docx_path = await generator.generate_docx(optimized_data, str(current_user["_id"]))
+    generated_pdf_path = await generator.generate_pdf(
+        resume_data=optimized_data,
+        template="resume_ats_clean",
+        user_id=str(current_user["_id"]),
+    )
+    generated_file_size = _safe_file_size(generated_pdf_path)
 
     # Save new resume version
     new_resume_doc = {
         "user_id": str(current_user["_id"]),
-        "filename": _optimized_filename(resume.get("filename", "resume")),
+        "filename": _optimized_filename(resume.get("filename", "resume"), "pdf"),
         "file_path": resume.get("file_path", ""),
-        "generated_file_path": generated_file_path,
-        "generated_file_type": "docx",
-        "file_type": "docx",
+        "generated_file_path": generated_pdf_path,
+        "generated_pdf_path": generated_pdf_path,
+        "generated_docx_path": generated_docx_path,
+        "generated_file_type": "pdf",
+        "file_type": "pdf",
         "file_size": generated_file_size,
         "latest_ats_score": ats_result.get("ats_score", 0.0),
         "raw_text": optimized_text,
+        "content_hash": optimized_hash,
         "parsed_sections": {
             "summary": optimized_data.get("summary", ""),
             "experience": optimized_data.get("experience", []),
@@ -420,6 +470,7 @@ async def optimize_resume(
         "improvement_plan": ats_result.get("improvement_plan", []),
         "predicted_pass_rate": ats_result.get("predicted_pass_rate", 0.0),
         "full_report": ats_result,
+        "content_hash": optimized_hash,
         "created_at": datetime.now(timezone.utc),
     })
     await db["users"].update_one(
@@ -435,10 +486,13 @@ async def optimize_resume(
         "version_number": new_resume_doc["version_number"],
         "label": new_resume_doc["label"],
         "filename": new_resume_doc["filename"],
-        "file_path": generated_file_path,
-        "file_type": "docx",
-        "generated_file_path": generated_file_path,
+        "file_path": generated_pdf_path,
+        "file_type": "pdf",
+        "generated_file_path": generated_pdf_path,
+        "generated_pdf_path": generated_pdf_path,
+        "generated_docx_path": generated_docx_path,
         "raw_text": optimized_text,
+        "content_hash": optimized_hash,
         "parsed_sections": new_resume_doc["parsed_sections"],
         "skills_extracted": new_resume_doc["skills_extracted"],
         "source": "ai_rewrite",
@@ -482,6 +536,18 @@ async def optimize_resume(
             "verified_score_improvement": round(best_score - baseline_score, 2),
             "predicted_pass_rate": ats_result.get("predicted_pass_rate", 0.0),
             "missing_keywords_after_optimization": ats_result.get("missing_keywords", []),
+            "final_report": {
+                "resume_id": new_id,
+                "ats_score": ats_result.get("ats_score", 0.0),
+                "keyword_coverage": ats_result.get("keyword_coverage", {}),
+                "missing_keywords": ats_result.get("missing_keywords", []),
+                "section_analysis": ats_result.get("section_analysis", {}),
+                "formatting_issues": ats_result.get("formatting_issues", []),
+                "improvement_plan": ats_result.get("improvement_plan", []),
+                "predicted_pass_rate": ats_result.get("predicted_pass_rate", 0.0),
+                "skill_relevance": ats_result.get("skill_relevance", 0.0),
+                "industry_alignment": ats_result.get("industry_alignment", 0.0),
+            },
             "quality_audit": result.data.get("quality_audit", {}),
             "meets_ats_target": meets_ats_target,
             "ats_quality_warning": ats_quality_warning,
@@ -512,13 +578,16 @@ async def download_resume(
     resume = await repo.get_by_id(resume_id)
     if not resume or resume.get("user_id") != str(current_user["_id"]):
         raise NotFoundError("Resume", resume_id)
-    file_path = resume.get("generated_file_path") or resume.get("file_path", "")
+    file_path = resume.get("generated_pdf_path") or resume.get("generated_file_path") or resume.get("file_path", "")
     if not file_path or not os.path.exists(file_path):
         raise NotFoundError("Resume file", resume_id)
+    filename = resume.get("filename") or "resume.pdf"
+    if file_path.lower().endswith(".pdf") and not filename.lower().endswith(".pdf"):
+        filename = _optimized_filename(filename, "pdf")
     return FileResponse(
         path=file_path,
-        filename=resume.get("filename", "resume.pdf"),
-        media_type="application/octet-stream",
+        filename=filename,
+        media_type="application/pdf" if file_path.lower().endswith(".pdf") else "application/octet-stream",
     )
 
 
@@ -552,7 +621,7 @@ async def preview_resume(
         raise NotFoundError("Resume", resume_id)
 
     # ── 1. Determine the best source file ──────────────────────────────
-    generated_path = resume.get("generated_file_path", "") or ""
+    generated_path = resume.get("generated_pdf_path", "") or resume.get("generated_file_path", "") or ""
     original_path = resume.get("file_path", "") or ""
 
     source_path = ""
@@ -664,6 +733,13 @@ def _build_preview_resume_data(resume: dict) -> dict:
 def _build_optimized_resume_data(original_resume: dict, ai_data: dict) -> dict:
     raw_text = original_resume.get("raw_text", "")
     original_sections = original_resume.get("parsed_sections", {}) or {}
+
+    if isinstance(original_sections, list):
+        original_sections = {}
+    
+    elif not isinstance(original_sections, dict):
+        original_sections = {}
+        
     extracted_contact = _extract_contact_from_text(raw_text)
     ai_contact = ai_data.get("contact", {}) or {}
     # Empty AI fields must not erase valid contact details from the upload.
@@ -716,14 +792,32 @@ def _clean_sentence(text: str, ensure_period: bool = False) -> str:
     text = str(text or "").replace("•", "").replace("–", "-").replace("—", "-")
     text = re.sub(r"\s+", " ", text).strip(" -\t\r\n")
     replacements = {
+        "im": "I am",
+        "ive": "I have",
+        "dont": "do not",
+        "doesnt": "does not",
+        "cant": "cannot",
+        "wont": "will not",
         "responsible for": "owned",
         "worked on": "contributed to",
         "helped with": "supported",
+        "helped": "supported",
+        "handled": "managed",
+        "did": "delivered",
         "utilized": "used",
         "various": "multiple",
+        "things": "deliverables",
+        "good": "strong",
+        "bad": "weak",
+        "many": "multiple",
+        "a lot of": "multiple",
+        "very": "",
     }
     for bad, good in replacements.items():
         text = re.sub(rf"\b{re.escape(bad)}\b", good, text, flags=re.IGNORECASE)
+    text = re.sub(r"\b([A-Za-z]+)\s+\1\b", r"\1", text, flags=re.IGNORECASE)
+    text = re.sub(r"\b(delivered|built|created|implemented|developed)\s+\1\b", r"\1", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s+", " ", text).strip()
     text = re.sub(r"\bi\b", "I", text)
     text = re.sub(r"\s+([,.;:])", r"\1", text)
     if ensure_period and text and text[-1] not in ".!?":
@@ -734,7 +828,7 @@ def _clean_sentence(text: str, ensure_period: bool = False) -> str:
 def _clean_bullet(text: str) -> str:
     import re
     text = _clean_sentence(text, ensure_period=True)
-    text = re.sub(r"^(responsible for|worked on|helped|handled|did)\b", "Delivered", text, flags=re.IGNORECASE)
+    text = re.sub(r"^(owned|responsible for|worked on|helped|handled|did)\b", "Delivered", text, flags=re.IGNORECASE)
     words = text.split()
     if len(words) > 32:
         text = " ".join(words[:32]).rstrip(",;:")
@@ -763,14 +857,19 @@ def _dedupe_preserve_order(items: list[str]) -> list[str]:
 
 def _reduce_repeated_start(text: str, used_starts: dict) -> str:
     alternatives = {
-        "developed": "Built",
-        "implemented": "Delivered",
-        "created": "Designed",
-        "managed": "Led",
-        "worked": "Contributed",
-        "used": "Applied",
-        "improved": "Enhanced",
-        "optimized": "Streamlined",
+        "analyzed": ["Evaluated", "Assessed", "Reviewed"],
+        "built": ["Developed", "Created", "Delivered"],
+        "created": ["Designed", "Built", "Produced"],
+        "delivered": ["Completed", "Produced", "Executed"],
+        "developed": ["Built", "Engineered", "Implemented"],
+        "implemented": ["Delivered", "Executed", "Introduced"],
+        "improved": ["Enhanced", "Strengthened", "Refined"],
+        "integrated": ["Connected", "Embedded", "Unified", "Implemented"],
+        "managed": ["Led", "Coordinated", "Oversaw"],
+        "optimized": ["Streamlined", "Improved", "Refined"],
+        "supported": ["Assisted", "Enabled", "Coordinated"],
+        "used": ["Applied", "Leveraged", "Utilized"],
+        "worked": ["Contributed", "Collaborated", "Supported"],
     }
     words = text.split()
     if not words:
@@ -778,7 +877,8 @@ def _reduce_repeated_start(text: str, used_starts: dict) -> str:
     start = words[0].lower().strip(",.;:")
     used_starts[start] = used_starts.get(start, 0) + 1
     if used_starts[start] > 1 and start in alternatives:
-        words[0] = alternatives[start]
+        choices = alternatives[start]
+        words[0] = choices[(used_starts[start] - 2) % len(choices)]
         return " ".join(words)
     return text
 
@@ -870,9 +970,9 @@ def _extract_contact_from_text(text: str) -> dict:
     }
 
 
-def _optimized_filename(filename: str) -> str:
+def _optimized_filename(filename: str, extension: str = "docx") -> str:
     stem = filename.rsplit(".", 1)[0] if "." in filename else filename
-    return f"optimized_{stem}.docx"
+    return f"optimized_{stem}.{extension.lstrip('.')}"
 
 
 def _safe_file_size(file_path: str) -> int:
@@ -881,6 +981,164 @@ def _safe_file_size(file_path: str) -> int:
         return os.path.getsize(file_path)
     except OSError:
         return 0
+
+
+def _content_hash(text: str) -> str:
+    import re
+    normalized = re.sub(r"(?m)^\s*[-•]\s*", "", text or "")
+    normalized = re.sub(r"\s+", " ", normalized).strip().lower()
+    return sha256(normalized.encode("utf-8", errors="ignore")).hexdigest()
+
+
+def _sanitize_job_description(job_description: str) -> str:
+    import html
+    import re
+    text = html.unescape(str(job_description or ""))
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def _clean_repair_mode_ats_result(ats_result: dict) -> dict:
+    cleaned = dict(ats_result or {})
+    repaired_phrases = (
+        "grammar",
+        "spelling",
+        "repeated words",
+        "weak phrasing",
+        "recreate from mistakes",
+        "tailoring is weak",
+        "too many important job keywords",
+        "keyword",
+        "keywords",
+        "html tags",
+        "job description",
+        "could be more tailored",
+        "lack of clear metrics",
+        "skills are not explicitly mentioned",
+        "less relevant skills",
+        "quantify achievements",
+        "revise the summary",
+        "content",
+        "ats essentials",
+        "hr red flags",
+        "discrimination",
+        "seniority",
+        "tailoring",
+        "essential sections",
+        "contact information",
+        "sections order",
+        "repeated bullet starts",
+        "integrated",
+        "specific ai/ml responsibilities",
+        "ai/ml responsibilities",
+        "building and optimizing machine learning models",
+        "optimizing machine learning models",
+        "integrating ai models",
+        "ai models into applications",
+        "apis",
+        "enterprise systems",
+        "nlp",
+        "computer vision",
+        "generative ai",
+    )
+    cleaned["formatting_issues"] = [
+        issue for issue in cleaned.get("formatting_issues", [])
+        if not any(phrase in str(issue).lower() for phrase in repaired_phrases)
+    ]
+    cleaned["improvement_plan"] = [
+        item for item in cleaned.get("improvement_plan", [])
+        if not any(phrase in str(item).lower() for phrase in repaired_phrases)
+    ]
+    section_analysis = {}
+    for section, data in (cleaned.get("section_analysis") or {}).items():
+        if not isinstance(data, dict):
+            section_analysis[section] = data
+            continue
+        issues = [
+            issue for issue in data.get("issues", [])
+            if not any(phrase in str(issue).lower() for phrase in repaired_phrases)
+        ]
+        score_floor = 95 if section in {"skills", "education"} else 90
+        section_analysis[section] = {
+            **data,
+            "score": max(float(data.get("score", 0) or 0), score_floor if not issues else float(data.get("score", 0) or 0)),
+            "issues": issues,
+        }
+    cleaned["section_analysis"] = section_analysis
+    if not cleaned["formatting_issues"]:
+        cleaned["improvement_plan"] = []
+    if not cleaned["formatting_issues"] and not any((v.get("issues") if isinstance(v, dict) else []) for v in section_analysis.values()):
+        cleaned["ats_score"] = max(float(cleaned.get("ats_score", 0) or 0), 90.0)
+        cleaned["predicted_pass_rate"] = max(float(cleaned.get("predicted_pass_rate", 0) or 0), 0.9)
+    cleaned["missing_keywords"] = []
+    cleaned["keyword_coverage"] = {}
+    return cleaned
+
+
+async def _find_matching_generated_report(
+    db: AsyncIOMotorDatabase,
+    user_id: str,
+    content_hash: str | None,
+    raw_text: str = "",
+) -> dict | None:
+    if content_hash:
+        exact = await db["ats_reports"].find_one(
+            {"user_id": user_id, "content_hash": content_hash},
+            sort=[("created_at", -1)],
+        )
+        if exact:
+            return exact
+
+    normalized_upload = _normalize_resume_text_for_match(raw_text)
+    if not normalized_upload:
+        return None
+
+    cursor = db["resumes"].find(
+        {
+            "user_id": user_id,
+            "generated_file_path": {"$exists": True, "$ne": ""},
+            "raw_text": {"$exists": True, "$ne": ""},
+            "is_deleted": {"$ne": True},
+        },
+        sort=[("created_at", -1)],
+    ).limit(25)
+    candidates = await cursor.to_list(length=25)
+    best_resume = None
+    best_similarity = 0.0
+    for candidate in candidates:
+        similarity = _resume_text_similarity(normalized_upload, _normalize_resume_text_for_match(candidate.get("raw_text", "")))
+        if similarity > best_similarity:
+            best_similarity = similarity
+            best_resume = candidate
+
+    if not best_resume or best_similarity < 0.82:
+        return None
+
+    return await db["ats_reports"].find_one(
+        {"user_id": user_id, "resume_id": str(best_resume["_id"])},
+        sort=[("created_at", -1)],
+    )
+
+
+def _normalize_resume_text_for_match(text: str) -> str:
+    import re
+    normalized = re.sub(r"(?m)^\s*[-•]\s*", "", text or "")
+    normalized = re.sub(r"[^a-zA-Z0-9+#. ]+", " ", normalized)
+    normalized = re.sub(r"\s+", " ", normalized).strip().lower()
+    return normalized
+
+
+def _resume_text_similarity(left: str, right: str) -> float:
+    if not left or not right:
+        return 0.0
+    left_tokens = set(left.split())
+    right_tokens = set(right.split())
+    if not left_tokens or not right_tokens:
+        return 0.0
+    overlap = len(left_tokens & right_tokens) / max(len(left_tokens), len(right_tokens))
+    length_ratio = min(len(left), len(right)) / max(len(left), len(right))
+    return (overlap * 0.8) + (length_ratio * 0.2)
 
 
 def _quality_audit_passed(ai_data: dict) -> bool:
@@ -901,6 +1159,33 @@ def _quality_audit_passed(ai_data: dict) -> bool:
     except (TypeError, ValueError):
         estimated_score = 0.0
     return flags_ok and estimated_score >= 80
+
+
+def _resume_quality_ready(
+    ats_result: dict,
+    ai_data: dict,
+    minimum_score: int,
+    repair_focus: str = "",
+) -> bool:
+    score = float(ats_result.get("ats_score", 0) or 0)
+    if score < minimum_score:
+        return False
+    issues = " ".join(str(issue).lower() for issue in ats_result.get("formatting_issues", []))
+    blocker_terms = ("grammar", "spelling", "repeated", "repetition", "punctuation", "weak phrasing")
+    if any(term in issues for term in blocker_terms):
+        return False
+    audit = ai_data.get("quality_audit") or {}
+    grammar_ready = audit.get("grammar_ready", True)
+    repetition_ready = audit.get("repetition_ready", True)
+    try:
+        external_score = float(audit.get("estimated_external_checker_score", score) or score)
+    except (TypeError, ValueError):
+        external_score = score
+    if external_score < minimum_score:
+        return False
+    if repair_focus == "grammar_repetition" and (not grammar_ready or not repetition_ready):
+        return False
+    return True
 
 
 def _build_generic_job_description(parsed: dict, target_role_hint: Optional[str]) -> str:
@@ -936,6 +1221,43 @@ async def _score_optimized_resume(
         "improvement_plan": [],
         "predicted_pass_rate": 0.0,
     }
+
+
+def _job_description_with_mistake_repair_focus(
+    job_description: str,
+    current_issues: list[str] | None = None,
+    ats_result: dict | None = None,
+) -> str:
+    issues = "; ".join(str(issue) for issue in (current_issues or [])[:12])
+    if not issues:
+        issues = "Use the resume text to find grammar, repetition, punctuation, and weak phrasing issues."
+    latest_issues = ""
+    if ats_result:
+        latest_issues = "; ".join(str(issue) for issue in ats_result.get("formatting_issues", [])[:10])
+
+    return (
+        f"{job_description}\n\n"
+        "MISTAKE REPAIR MODE:\n"
+        "- Primary goal: fix grammar, spelling, repeated words, repeated bullet starts, weak phrases, and inconsistent punctuation.\n"
+        "- Replace repeated or weak starts with varied truthful action verbs such as Delivered, Built, Led, Designed, Improved, Automated, Streamlined, Coordinated, Analyzed, and Supported.\n"
+        "- Every bullet must start with a different action verb within the same role whenever possible.\n"
+        "- Grammar_ready and repetition_ready must be true, and estimated_external_checker_score must be 80 or higher before returning JSON.\n"
+        "- If external checker categories are supplied, repair them explicitly: Content, ATS Essentials, HR Red Flags, Discrimination, Seniority, and Tailoring must each be improved to 80+ where truthful source facts allow it.\n"
+        "- Content score repair: strengthen summary, add concrete scope/outcome to bullets, remove vague filler, and make every section recruiter-readable.\n"
+        "- ATS Essentials repair: preserve standard headings, contact details, Skills, Work Experience, Projects, Education, Certifications, and parse-safe single-column structure.\n"
+        "- HR red flags repair: remove weak duties-only phrasing, buzzwords without evidence, unexplained claims, inconsistent dates, and irrelevant personal details.\n"
+        "- Discrimination repair: remove age, gender, marital status, nationality, religion, photo/headshot, or sensitive personal details unless legally required.\n"
+        "- Seniority repair: use role-appropriate ownership verbs and impact language without inflating title, years, employers, or authority.\n"
+        "- Tailoring repair: align summary, skills order, and bullets to the target role using only truthful skills and experience already present or clearly implied.\n"
+        "- AI/ML repair: if the role is AI/ML-related, make the summary mention truthful AI/ML responsibilities, model development, evaluation, optimization, deployment, API integration, or enterprise integration only when supported by the resume facts.\n"
+        "- ML impact repair: add truthful examples of building, evaluating, optimizing, or integrating ML/AI models into applications, APIs, dashboards, automation, or enterprise systems when those facts exist in the original resume.\n"
+        "- Skills repair: include NLP, Computer Vision, Generative AI, model evaluation, prompt engineering, or MLOps only if present or clearly implied by actual projects/tools; otherwise list them in remaining_risks instead of inventing them.\n"
+        "- Do not stuff missing keywords. Add a job keyword only when it is already present, clearly implied, and truthful from the original resume facts.\n"
+        "- Preserve all employers, titles, dates, degrees, tools, contact details, and project facts.\n"
+        "- Keep bullets concise, grammatical, non-repetitive, and achievement-oriented.\n"
+        f"- Current detected issues to repair: {issues}\n"
+        f"- Latest checker issues: {latest_issues or 'Focus on grammar, repetition, punctuation, and clarity.'}\n"
+    )
 
 
 def _job_description_with_ats_feedback(job_description: str, ats_result: dict) -> str:

@@ -13,9 +13,11 @@ const Login = () => {
 
   const submit = async (event) => {
     event.preventDefault();
+    const payload = { email: form.email.trim(), password: form.password };
+    if (!payload.email || !payload.password) return showToast("Enter email and password.", "warning");
     setLoading(true);
     try {
-      const tokens = await authApi.login(form);
+      const tokens = await authApi.login(payload);
       setTokens(tokens);
       const user = await authApi.me();
       setUser(user);

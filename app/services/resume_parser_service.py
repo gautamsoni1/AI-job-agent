@@ -1,5 +1,6 @@
 import io
 import re
+from hashlib import sha256
 from pathlib import Path
 from typing import Optional
 
@@ -33,6 +34,7 @@ class ResumeParserService:
         structured = self._extract_structure(raw_text)
         return {
             "raw_text": raw_text,
+            "content_hash": self._content_hash(raw_text),
             "word_count": len(raw_text.split()),
             "char_count": len(raw_text),
             **structured,
@@ -60,6 +62,11 @@ class ResumeParserService:
                 logger.error("pymupdf_failed", error=str(e), file=file_path)
 
         return text.strip()
+
+    def _content_hash(self, text: str) -> str:
+        normalized = re.sub(r"(?m)^\s*[-•]\s*", "", text or "")
+        normalized = re.sub(r"\s+", " ", normalized).strip().lower()
+        return sha256(normalized.encode("utf-8", errors="ignore")).hexdigest()
 
     async def _extract_docx_text(self, file_path: str) -> str:
         try:

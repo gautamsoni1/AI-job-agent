@@ -34,7 +34,7 @@ class ForbiddenError(APIError):
 
 class ValidationError(APIError):
     def __init__(self, message: str, details: dict = None):
-        super().__init__(status_code=422, code="VALIDATION_ERROR", message=message, details=details)
+        super().__init__(status_code=400, code="VALIDATION_ERROR", message=message, details=details)
 
 
 class AIAgentError(APIError):
@@ -49,7 +49,7 @@ class AIAgentError(APIError):
 
 class ResumeParseError(APIError):
     def __init__(self, message: str, details: dict = None):
-        super().__init__(status_code=422, code="RESUME_PARSE_FAILED", message=message, details=details)
+        super().__init__(status_code=400, code="RESUME_PARSE_FAILED", message=message, details=details)
 
 
 class DuplicateError(APIError):

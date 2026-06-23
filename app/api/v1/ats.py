@@ -28,7 +28,7 @@ async def score_resume(
     if not resume or resume.get("user_id") != str(current_user["_id"]):
         raise NotFoundError("Resume", body.resume_id)
 
-    job_description = body.job_description or ""
+    job_description = _sanitize_job_description(body.job_description or "")
     if not job_description.strip():
         job_repo = JobRepository(db)
         jobs = await job_repo.find_by_user(str(current_user["_id"]), limit=1)
@@ -52,7 +52,7 @@ async def score_resume(
     if not result.success:
         raise ValidationError(f"ATS scoring failed: {result.error or 'AI service error'}")
 
-    data = result.data
+    data = _normalize_issue_free_score(result.data)
     report_doc = {
         "user_id": str(current_user["_id"]),
         "resume_id": body.resume_id,
@@ -180,10 +180,33 @@ async def get_improvement_plan(
 
 def _serialize_report(r: dict) -> dict:
     r = dict(r)
+    r = _normalize_issue_free_score(r)
     if "_id" in r:
         r["_id"] = str(r["_id"])
     r.pop("full_report", None)
     return r
+
+
+def _normalize_issue_free_score(data: dict) -> dict:
+    data = dict(data or {})
+    section_analysis = data.get("section_analysis") or {}
+    section_issues = []
+    for section in section_analysis.values():
+        if isinstance(section, dict):
+            section_issues.extend(section.get("issues", []) or [])
+
+    has_visible_issues = bool(
+        data.get("formatting_issues")
+        or data.get("improvement_plan")
+        or data.get("missing_keywords")
+        or section_issues
+    )
+    if not has_visible_issues:
+        data["ats_score"] = max(float(data.get("ats_score", 0) or 0), 90.0)
+        data["skill_relevance"] = max(float(data.get("skill_relevance", 0) or 0), 90.0)
+        data["industry_alignment"] = max(float(data.get("industry_alignment", 0) or 0), 90.0)
+        data["predicted_pass_rate"] = max(float(data.get("predicted_pass_rate", 0) or 0), 0.9)
+    return data
 
 
 async def _log_timeline(db, user_id: str, event_type: str, title: str, metadata: dict):
@@ -222,3 +245,12 @@ def _generic_job_description(skills: list[str]) -> str:
         "standard sections, readable ATS-safe structure, measurable achievements, clear "
         "experience bullets, grammar, keyword relevance, and absence of hiring red flags."
     )
+
+
+def _sanitize_job_description(job_description: str) -> str:
+    import html
+    import re
+    text = html.unescape(str(job_description or ""))
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text

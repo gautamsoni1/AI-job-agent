@@ -86,6 +86,24 @@ class GroqClient:
     # keys have just been proven quota-exhausted.
     _provider_cooldowns: dict[str, float] = {}
     _quota_cooldown_seconds = 3600
+    _open_weight_models = {
+        "groq": {
+            "llama-3.3-70b-versatile",
+            "llama-3.1-8b-instant",
+            "llama-3.1-70b-versatile",
+            "llama3-70b-8192",
+            "llama3-8b-8192",
+            "mixtral-8x7b-32768",
+            "gemma2-9b-it",
+        },
+        "mistral": {
+            "open-mistral-7b",
+            "open-mistral-nemo",
+            "open-mixtral-8x7b",
+            "open-mixtral-8x22b",
+        },
+        "gemini": set(),
+    }
 
     def __init__(self):
         self._max_retries = {
@@ -107,11 +125,18 @@ class GroqClient:
             "mistral": (settings.MISTRAL_PRIMARY_MODEL, settings.MISTRAL_FALLBACK_MODEL),
             "gemini": (settings.GEMINI_PRIMARY_MODEL, settings.GEMINI_FALLBACK_MODEL),
         }
+        self._models = {
+            provider: self._open_weight_pair(provider, *models)
+            for provider, models in self._models.items()
+        }
 
-        # --- Provider fallback chain, e.g. ["groq", "mistral", "gemini"] ---
-        configured_order = settings.llm_provider_order_list or ["groq", "mistral", "gemini"]
-        # Only keep providers that actually have at least one key configured.
-        self.provider_chain = [p for p in configured_order if self._rotators.get(p) and self._rotators[p].available]
+        # --- Provider fallback chain, e.g. ["groq", "mistral"] ---
+        configured_order = settings.llm_provider_order_list or ["groq", "mistral"]
+        # Only keep providers that have keys and at least one approved open-weight model.
+        self.provider_chain = [
+            p for p in configured_order
+            if self._rotators.get(p) and self._rotators[p].available and any(self._models.get(p, ("", "")))
+        ]
 
         if not self.provider_chain:
             logger.error("no_llm_providers_configured")
@@ -123,6 +148,19 @@ class GroqClient:
         first_provider = self.provider_chain[0] if self.provider_chain else "groq"
         self.primary_model = self._models.get(first_provider, (settings.GROQ_PRIMARY_MODEL, ""))[0]
         self.fallback_model = self._models.get(first_provider, ("", settings.GROQ_FALLBACK_MODEL))[1]
+
+    def _open_weight_pair(self, provider: str, primary_model: str, fallback_model: str) -> tuple[str, str]:
+        allowed = self._open_weight_models.get(provider, set())
+        approved = []
+        for model in (primary_model, fallback_model):
+            if not model:
+                approved.append("")
+            elif model in allowed:
+                approved.append(model)
+            else:
+                logger.warning("non_open_weight_model_disabled", provider=provider, model=model)
+                approved.append("")
+        return approved[0], approved[1]
 
     # ------------------------------------------------------------------
     # PUBLIC API — unchanged signatures

@@ -13,10 +13,11 @@ const ResetPassword = () => {
   const submit = async (event) => {
     event.preventDefault();
     if (!token) return showToast("Reset link is invalid. Request a new one.", "danger");
-    if (new_password.length < 8) return showToast("Password must be at least 8 characters", "warning");
+    const password = new_password.trim();
+    if (password.length < 8) return showToast("Password must be at least 8 characters", "warning");
     setSubmitting(true);
     try {
-      const res = await authApi.resetPassword({ token, new_password });
+      const res = await authApi.resetPassword({ token, new_password: password });
       showToast(res.message || "Password reset complete", "success");
       navigate("/login", { replace: true });
     } finally {

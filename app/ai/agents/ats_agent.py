@@ -170,7 +170,11 @@ class ATSAgent(BaseAgent):
             repeated_starts = {s for s in starts if starts.count(s) > 1}
             if repeated_starts:
                 penalty += min(10, 3 * len(repeated_starts))
-                issues.append("Repeated bullet starts detected: " + ", ".join(sorted(repeated_starts)[:5]))
+                issues.append(
+                    "Repeated bullet starts detected: "
+                    + ", ".join(sorted(repeated_starts)[:5])
+                    + ". Replace repeats with varied verbs like Built, Delivered, Led, Improved, Automated, Streamlined, Coordinated, or Analyzed."
+                )
             inconsistent = sum(1 for b in bullets if b and b[-1] not in ".!?")
             if inconsistent:
                 penalty += min(6, inconsistent * 1.5)
@@ -189,7 +193,7 @@ class ATSAgent(BaseAgent):
         grammar_hits = sum(len(re.findall(pattern, text, re.I)) for pattern in grammar_patterns)
         if grammar_hits:
             penalty += min(10, grammar_hits * 2)
-            issues.append("Grammar, spelling, or weak phrasing issues detected.")
+            issues.append("Grammar, spelling, repeated words, or weak phrasing detected. Recreate from mistakes to fix wording and punctuation.")
 
         if job_keywords:
             covered = sum(1 for kw in job_keywords if re.search(r"(?<![a-zA-Z0-9])" + re.escape(kw.lower()) + r"(?![a-zA-Z0-9])", lower))

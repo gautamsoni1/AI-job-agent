@@ -20,20 +20,106 @@ class ResumeGeneratorService:
 
     async def generate_pdf(self, resume_data: dict, template: str = "resume_ats_clean", user_id: str = "") -> str:
         """Generate PDF resume from structured data. Returns file path."""
-        from weasyprint import HTML
-
         html_content = self._render_template(f"{template}.html", resume_data)
         timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
         filename = f"resume_{user_id}_{timestamp}.pdf"
         output_path = OUTPUT_DIR / filename
 
         try:
+            from weasyprint import HTML
             HTML(string=html_content, base_url=str(TEMPLATES_DIR)).write_pdf(str(output_path))
             logger.info("resume_pdf_generated", path=str(output_path))
             return str(output_path)
         except Exception as e:
-            logger.error("resume_pdf_failed", error=str(e))
-            raise
+            logger.warning("weasyprint_pdf_failed_using_fallback", error=str(e))
+            return self._generate_pdf_with_pymupdf(resume_data, output_path)
+
+    def _generate_pdf_with_pymupdf(self, resume_data: dict, output_path: Path) -> str:
+        """Pure-Python/native-light PDF fallback using PyMuPDF, already used by the parser."""
+        import fitz
+        import textwrap
+
+        doc = fitz.open()
+        page = doc.new_page(width=595, height=842)
+        x = 54
+        y = 48
+        line_height = 12
+        page_bottom = 790
+
+        def ensure_space(lines: int = 1):
+            nonlocal page, y
+            if y + (lines * line_height) > page_bottom:
+                page = doc.new_page(width=595, height=842)
+                y = 48
+
+        def write(text: str, size: int = 10, bold: bool = False, indent: int = 0):
+            nonlocal y
+            if not text:
+                return
+            font = "helv-bold" if bold else "helv"
+            width = 82 if indent else 92
+            for line in textwrap.wrap(str(text), width=width) or [""]:
+                ensure_space()
+                page.insert_text((x + indent, y), line, fontsize=size, fontname=font, color=(0, 0, 0))
+                y += line_height
+
+        def section(title: str):
+            nonlocal y
+            y += 6
+            write(title.upper(), size=10, bold=True)
+            y += 2
+
+        write(resume_data.get("full_name", "Candidate"), size=18, bold=True)
+        contact = resume_data.get("contact", {}) or {}
+        contact_line = " | ".join(
+            str(contact.get(key, "")).strip()
+            for key in ("email", "phone", "linkedin", "location")
+            if contact.get(key)
+        )
+        write(contact_line, size=9)
+
+        if resume_data.get("summary"):
+            section("Professional Summary")
+            write(resume_data["summary"])
+
+        if resume_data.get("skills"):
+            section("Skills")
+            write(", ".join(str(skill) for skill in resume_data["skills"]))
+
+        if resume_data.get("experience"):
+            section("Work Experience")
+            for exp in resume_data["experience"]:
+                write(" - ".join(filter(None, [exp.get("title", ""), exp.get("company", "")])), bold=True)
+                meta = " | ".join(filter(None, [
+                    " - ".join(filter(None, [exp.get("start_date", ""), exp.get("end_date", "")])),
+                    exp.get("location", ""),
+                ]))
+                write(meta, size=9)
+                for bullet in exp.get("bullets", []):
+                    write(f"- {bullet}", indent=12)
+
+        if resume_data.get("projects"):
+            section("Projects")
+            for project in resume_data["projects"]:
+                write(project.get("name", "Project"), bold=True)
+                write(project.get("description", ""))
+                if project.get("technologies"):
+                    write("Technologies: " + ", ".join(project["technologies"]))
+
+        if resume_data.get("education"):
+            section("Education")
+            for edu in resume_data["education"]:
+                write(" - ".join(filter(None, [edu.get("degree", ""), edu.get("institution", ""), edu.get("year", "")])), bold=True)
+
+        if resume_data.get("certifications"):
+            section("Certifications")
+            for certification in resume_data["certifications"]:
+                write(str(certification))
+
+        doc.save(str(output_path))
+        doc.close()
+        logger.info("resume_pdf_generated_fallback", path=str(output_path))
+        return str(output_path)
 
     async def generate_docx(self, resume_data: dict, user_id: str = "") -> str:
         """Generate an ATS-friendly DOCX resume. Returns file path."""

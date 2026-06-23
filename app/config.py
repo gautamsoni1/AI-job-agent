@@ -48,28 +48,29 @@ class Settings(BaseSettings):
     GROQ_FALLBACK_MODEL: str = "llama-3.1-8b-instant"
     GROQ_MAX_RETRIES: int = 3
 
-    # --- Mistral (2nd fallback provider). Official api.mistral.ai. ---
+    # --- Mistral (2nd fallback provider). Official api.mistral.ai open-weight models. ---
     MISTRAL_API_KEY_1: str = ""
     MISTRAL_API_KEY_2: str = ""
     MISTRAL_API_KEY_3: str = ""
     MISTRAL_API_KEY_4: str = ""
     MISTRAL_API_KEY_5: str = ""
-    MISTRAL_PRIMARY_MODEL: str = "mistral-small-latest"
-    MISTRAL_FALLBACK_MODEL: str = "mistral-medium-latest"
+    MISTRAL_PRIMARY_MODEL: str = "open-mistral-nemo"
+    MISTRAL_FALLBACK_MODEL: str = "open-mixtral-8x7b"
     MISTRAL_MAX_RETRIES: int = 3
 
-    # --- Gemini (3rd / last fallback provider). Free-tier friendly. ---
+    # --- Gemini keys are kept for compatibility, but Gemini is not used by default
+    # because this app is configured for open-weight models only.
     GEMINI_API_KEY_1: str = ""
     GEMINI_API_KEY_2: str = ""
     GEMINI_API_KEY_3: str = ""
     GEMINI_API_KEY_4: str = ""
     GEMINI_API_KEY_5: str = ""
-    GEMINI_PRIMARY_MODEL: str = "gemini-flash-latest"
-    GEMINI_FALLBACK_MODEL: str = "gemini-2.5-flash-lite"
+    GEMINI_PRIMARY_MODEL: str = ""
+    GEMINI_FALLBACK_MODEL: str = ""
     GEMINI_MAX_RETRIES: int = 3
 
     # Overall LLM behavior
-    LLM_PROVIDER_ORDER: str = "groq,mistral,gemini"
+    LLM_PROVIDER_ORDER: str = "groq,mistral"
 
     # ==========================================
     # CHROMADB (OPEN SOURCE)
@@ -251,8 +252,8 @@ def validate_startup_config() -> None:
     -----
     HARD FAILURES (server refuses to start):
       - JWT_SECRET_KEY / JWT_REFRESH_SECRET still set to the insecure defaults.
-      - Not a single valid LLM API key across all three providers
-        (Groq + Mistral + Gemini). At least one provider must be ready
+      - Not a single valid open-weight LLM API key across Groq/Mistral.
+        At least one provider must be ready
         or every AI feature will fail immediately.
 
     WARNINGS (server starts, but logs a clear message):
@@ -281,20 +282,18 @@ def validate_startup_config() -> None:
     has_mistral = bool(settings.mistral_api_keys)
     has_gemini = bool(settings.gemini_api_keys)
 
-    if not has_groq and not has_mistral and not has_gemini:
+    if not has_groq and not has_mistral:
         errors.append(
-            "No LLM API keys found. Set at least one of: "
-            "GROQ_API_KEY_1, MISTRAL_API_KEY_1, or GEMINI_API_KEY_1 in .env. "
+            "No open-weight LLM API keys found. Set at least one of: "
+            "GROQ_API_KEY_1 or MISTRAL_API_KEY_1 in .env. "
             "All AI features (resume analysis, ATS scoring, job matching, etc.) will fail without this."
         )
     else:
         # Individual provider warnings so the developer knows what fallbacks are available
         if not has_groq:
-            warnings.append("GROQ_API_KEY_1..5 are all empty — Groq provider disabled (Mistral/Gemini will be used as fallback).")
+            warnings.append("GROQ_API_KEY_1..5 are all empty — Groq provider disabled (Mistral will be used as fallback).")
         if not has_mistral:
             warnings.append("MISTRAL_API_KEY_1..5 are all empty — Mistral provider disabled.")
-        if not has_gemini:
-            warnings.append("GEMINI_API_KEY_1..5 are all empty — Gemini fallback provider disabled.")
 
     # --- Apify (optional but needed for job discovery) ---
     apify = (settings.APIFY_TOKEN or "").strip()

@@ -42,6 +42,8 @@ class ResumeAnalysisResponse(BaseModel):
 class ResumeOptimizeRequest(BaseModel):
     job_description: Optional[str] = None
     target_role: Optional[str] = None
+    repair_focus: Optional[str] = None
+    current_issues: list[str] = []
 
 
 class ResumeOptimizeResponse(BaseModel):

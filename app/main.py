@@ -5,6 +5,7 @@ import asyncio
 import structlog
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -105,6 +106,27 @@ def create_app() -> FastAPI:
                     "code": exc.code,
                     "message": exc.message,
                     "details": exc.details or {},
+                },
+                "request_id": request.state.request_id if hasattr(request.state, "request_id") else None,
+            },
+        )
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_error_handler(request: Request, exc: RequestValidationError):
+        details = exc.errors()
+        first = details[0] if details else {}
+        field = ".".join(str(part) for part in first.get("loc", []) if part != "body")
+        message = first.get("msg", "Invalid request")
+        if field:
+            message = f"{field}: {message}"
+        return JSONResponse(
+            status_code=400,
+            content={
+                "success": False,
+                "error": {
+                    "code": "VALIDATION_ERROR",
+                    "message": message,
+                    "details": {"errors": details},
                 },
                 "request_id": request.state.request_id if hasattr(request.state, "request_id") else None,
             },

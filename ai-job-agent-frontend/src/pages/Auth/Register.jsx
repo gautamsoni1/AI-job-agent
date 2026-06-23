@@ -10,8 +10,16 @@ const Register = () => {
 
   const submit = async (event) => {
     event.preventDefault();
-    if (form.password.length < 8) return showToast("Password must be at least 8 characters", "warning");
-    const res = await authApi.register(form);
+    const payload = {
+      ...form,
+      first_name: form.first_name.trim(),
+      last_name: form.last_name.trim(),
+      email: form.email.trim(),
+      phone: form.phone.trim(),
+    };
+    if (!payload.first_name || !payload.last_name || !payload.email) return showToast("Name and email are required.", "warning");
+    if (payload.password.length < 8) return showToast("Password must be at least 8 characters", "warning");
+    const res = await authApi.register(payload);
     showToast(res.message || "Account created. Check your email.", "success");
     setDone(true);
   };
